@@ -357,11 +357,11 @@ def _run_one_search(
     filtered = before - len(df)
 
     conn = get_connection()
-    new, existing = store_jobspy_results(conn, df, s["query"])
-
-    # Update discovery cursors per (query, location, site): count consecutive
-    # trailing dups in the returned (newest-first) list and record the frontier.
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Count consecutive trailing dups BEFORE storing, so newly-inserted jobs
+    # (which didn't exist yet) correctly break the dup run. This finds the
+    # frontier: the first index past which every result is already known.
     for site in sites:
         site_df = df[df.get("site", "").astype(str).str.lower() == site.lower()] if "site" in df.columns else df
         urls = [
@@ -371,11 +371,14 @@ def _run_one_search(
         if urls:
             consec = _count_consecutive_dups(conn, urls)
             if consec >= CONSEC_DUP_STOP:
+                # Frontier crossed: record where the dup run begins.
                 _set_cursor(conn, s["query"], s["location"], site,
                             max(0, len(urls) - consec), now_iso)
             else:
                 # Didn't cross the frontier: remember full depth scanned.
                 _set_cursor(conn, s["query"], s["location"], site, len(urls), now_iso)
+
+    new, existing = store_jobspy_results(conn, df, s["query"])
 
     msg = f"[{label}] {before} results -> {new} new, {existing} dupes"
     if filtered:
