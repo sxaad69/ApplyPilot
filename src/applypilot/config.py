@@ -180,6 +180,16 @@ def load_env():
     load_dotenv()
 
 
+def get_min_fit_score() -> int:
+    """Return the minimum fit score from MIN_FIT_SCORE env (default 7)."""
+    load_env()
+    raw = os.environ.get("MIN_FIT_SCORE", "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULTS["min_score"]
+
+
 # ---------------------------------------------------------------------------
 # Tier system — feature gating by installed dependencies
 # ---------------------------------------------------------------------------
@@ -187,47 +197,33 @@ def load_env():
 TIER_LABELS = {
     1: "Discovery",
     2: "AI Scoring & Tailoring",
-    3: "Full Auto-Apply",
 }
 
 TIER_COMMANDS: dict[int, list[str]] = {
-    1: ["init", "run discover", "run enrich", "status", "dashboard"],
+    1: ["init", "run discover", "run enrich", "status", "list", "dashboard"],
     2: ["run score", "run tailor", "run cover", "run pdf", "run"],
-    3: ["apply"],
 }
 
 
 def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
-    Tier 1 (Discovery):            Python + pip
-    Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 1 (Discovery):                Python + pip
+    Tier 2 (AI Scoring & Tailoring):   + OpenAI-compatible LLM endpoint
+
+    Stage 6 (Auto-Apply) is disabled in this build — there is no Tier 3.
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
-    if not has_llm:
-        return 1
-
-    has_claude = shutil.which("claude") is not None
-    try:
-        get_chrome_path()
-        has_chrome = True
-    except FileNotFoundError:
-        has_chrome = False
-
-    if has_claude and has_chrome:
-        return 3
-
-    return 2
+    has_llm = any(os.environ.get(k) for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "LLM_URL"))
+    return 2 if has_llm else 1
 
 
 def check_tier(required: int, feature: str) -> None:
     """Raise SystemExit with a clear message if the current tier is too low.
 
     Args:
-        required: Minimum tier needed (1, 2, or 3).
+        required: Minimum tier needed (1 or 2).
         feature: Human-readable description of the feature being gated.
     """
     current = get_tier()
@@ -238,15 +234,11 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
-    if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
-        try:
-            get_chrome_path()
-        except FileNotFoundError:
-            missing.append("Chrome/Chromium — install or set CHROME_PATH")
+    if required >= 2 and not any(os.environ.get(k) for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "LLM_URL")):
+        missing.append(
+            "LLM endpoint — set OPENAI_BASE_URL + OPENAI_API_KEY in "
+            "[bold]~/.applypilot/.env[/bold] (e.g. OmniRoute / DeepSeek / Qwen)"
+        )
 
     _console.print(
         f"\n[red]'{feature}' requires {TIER_LABELS.get(required, f'Tier {required}')} (Tier {required}).[/red]\n"

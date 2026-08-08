@@ -654,141 +654,14 @@ def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, continuous: bool = False,
          poll_interval: int = 60, workers: int = 1) -> None:
-    """Launch the apply pipeline.
+    """Stage 6 (Auto-Apply) is DISABLED in this build.
 
-    Args:
-        limit: Max jobs to apply to (0 or with continuous=True means run forever).
-        target_url: Apply to a specific URL.
-        min_score: Minimum fit_score threshold.
-        headless: Run Chrome in headless mode.
-        model: Claude model name.
-        dry_run: Don't click Submit.
-        continuous: Run forever, polling for new jobs.
-        poll_interval: Seconds between DB polls when queue is empty.
-        workers: Number of parallel workers (default 1).
+    Kept as a no-op stub so any legacy imports do not launch Claude Code /
+    Playwright browser automation. Manual application is the intended flow.
     """
-    global POLL_INTERVAL
-    POLL_INTERVAL = poll_interval
-    _stop_event.clear()
-
-    config.ensure_dirs()
     console = Console()
-
-    if continuous:
-        effective_limit = 0
-        mode_label = "continuous"
-    else:
-        effective_limit = limit
-        mode_label = f"{limit} jobs"
-
-    # Initialize dashboard for all workers
-    for i in range(workers):
-        init_worker(i)
-
-    worker_label = f"{workers} worker{'s' if workers > 1 else ''}"
-    console.print(f"Launching apply pipeline ({mode_label}, {worker_label}, poll every {POLL_INTERVAL}s)...")
-    console.print("[dim]Ctrl+C = skip current job(s) | Ctrl+C x2 = stop[/dim]")
-
-    # Double Ctrl+C handler
-    _ctrl_c_count = 0
-
-    def _sigint_handler(sig, frame):
-        nonlocal _ctrl_c_count
-        _ctrl_c_count += 1
-        if _ctrl_c_count == 1:
-            console.print("\n[yellow]Skipping current job(s)... (Ctrl+C again to STOP)[/yellow]")
-            # Kill all active Claude processes to skip current jobs
-            with _claude_lock:
-                for wid, cproc in list(_claude_procs.items()):
-                    if cproc.poll() is None:
-                        _kill_process_tree(cproc.pid)
-        else:
-            console.print("\n[red bold]STOPPING[/red bold]")
-            _stop_event.set()
-            with _claude_lock:
-                for wid, cproc in list(_claude_procs.items()):
-                    if cproc.poll() is None:
-                        _kill_process_tree(cproc.pid)
-            kill_all_chrome()
-            raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, _sigint_handler)
-
-    try:
-        with Live(render_full(), console=console, refresh_per_second=2) as live:
-            # Daemon thread for display refresh only (no business logic)
-            _dashboard_running = True
-
-            def _refresh():
-                while _dashboard_running:
-                    live.update(render_full())
-                    time.sleep(0.5)
-
-            refresh_thread = threading.Thread(target=_refresh, daemon=True)
-            refresh_thread.start()
-
-            if workers == 1:
-                # Single worker — run directly in main thread
-                total_applied, total_failed = worker_loop(
-                    worker_id=0,
-                    limit=effective_limit,
-                    target_url=target_url,
-                    min_score=min_score,
-                    headless=headless,
-                    model=model,
-                    dry_run=dry_run,
-                )
-            else:
-                # Multi-worker — distribute limit across workers
-                if effective_limit:
-                    base = effective_limit // workers
-                    extra = effective_limit % workers
-                    limits = [base + (1 if i < extra else 0)
-                              for i in range(workers)]
-                else:
-                    limits = [0] * workers  # continuous mode
-
-                with ThreadPoolExecutor(max_workers=workers,
-                                        thread_name_prefix="apply-worker") as executor:
-                    futures = {
-                        executor.submit(
-                            worker_loop,
-                            worker_id=i,
-                            limit=limits[i],
-                            target_url=target_url,
-                            min_score=min_score,
-                            headless=headless,
-                            model=model,
-                            dry_run=dry_run,
-                        ): i
-                        for i in range(workers)
-                    }
-
-                    results: list[tuple[int, int]] = []
-                    for future in as_completed(futures):
-                        wid = futures[future]
-                        try:
-                            results.append(future.result())
-                        except Exception:
-                            logger.exception("Worker %d crashed", wid)
-                            results.append((0, 0))
-
-                total_applied = sum(r[0] for r in results)
-                total_failed = sum(r[1] for r in results)
-
-            _dashboard_running = False
-            refresh_thread.join(timeout=2)
-            live.update(render_full())
-
-        totals = get_totals()
-        console.print(
-            f"\n[bold]Done: {total_applied} applied, {total_failed} failed "
-            f"(${totals['cost']:.3f})[/bold]"
-        )
-        console.print(f"Logs: {config.LOG_DIR}")
-
-    except KeyboardInterrupt:
-        pass
-    finally:
-        _stop_event.set()
-        kill_all_chrome()
+    console.print(
+        "\n[bold yellow][AUTO-APPLY DISABLED][/bold yellow]\n"
+        "Stage 6 skipped. Use Hermes browser automation or apply manually. "
+        "Run `applypilot apply --list` to see prepared jobs."
+    )

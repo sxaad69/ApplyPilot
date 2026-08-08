@@ -60,8 +60,8 @@ _UPSTREAM: dict[str, str | None] = {
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
+    """Stage: Job discovery — JobSpy, Workday, smart-extract, and API sources."""
+    stats: dict = {"jobspy": None, "workday": None, "smartextract": None, "api": None}
 
     # JobSpy
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
@@ -96,6 +96,22 @@ def _run_discover(workers: int = 1) -> dict:
         console.print(f"  [red]Smart extract error:[/red] {e}")
         stats["smartextract"] = f"error: {e}"
 
+    # Free API sources (Arbeitnow, RemoteOK, Adzuna, USAJobs, Muse, RSS)
+    console.print("  [cyan]Job API sources (Arbeitnow/RemoteOK/etc)...[/cyan]")
+    try:
+        from applypilot.fetchers_api import run_api_discovery
+        api_stats = run_api_discovery()
+        stats["api"] = (
+            f"ok: +{api_stats.get('new', 0)} new, "
+            f"{api_stats.get('existing', 0)} dupes, "
+            f"{api_stats.get('errors', 0)} source errors"
+        )
+        console.print(f"  [dim]  API: {stats['api']}[/dim]")
+    except Exception as e:
+        log.error("API discovery failed: %s", e)
+        console.print(f"  [red]API discovery error:[/red] {e}")
+        stats["api"] = f"error: {e}"
+
     return stats
 
 
@@ -110,11 +126,11 @@ def _run_enrich(workers: int = 1) -> dict:
         return {"status": f"error: {e}"}
 
 
-def _run_score() -> dict:
+def _run_score(min_score: int = 7) -> dict:
     """Stage: LLM scoring — assign fit scores 1-10."""
     try:
         from applypilot.scoring.scorer import run_scoring
-        run_scoring()
+        run_scoring(min_score=min_score)
         return {"status": "ok"}
     except Exception as e:
         log.error("Scoring failed: %s", e)
@@ -271,8 +287,9 @@ def _run_stage_streaming(
     """
     runner = _STAGE_RUNNERS[stage]
     kwargs: dict = {}
-    if stage in ("tailor", "cover"):
+    if stage in ("score", "tailor", "cover"):
         kwargs["min_score"] = min_score
+    if stage in ("tailor", "cover"):
         kwargs["validation_mode"] = validation_mode
     if stage in ("discover", "enrich"):
         kwargs["workers"] = workers
@@ -342,8 +359,9 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1,
 
         try:
             kwargs: dict = {}
-            if name in ("tailor", "cover"):
+            if name in ("score", "tailor", "cover"):
                 kwargs["min_score"] = min_score
+            if name in ("tailor", "cover"):
                 kwargs["validation_mode"] = validation_mode
             if name in ("discover", "enrich"):
                 kwargs["workers"] = workers
@@ -536,5 +554,21 @@ def run_pipeline(
     console.print(f"    Ready to apply: {final['ready_to_apply']}")
     console.print(f"    Applied:        {final['applied']}")
     console.print(f"{'=' * 70}\n")
+
+    # Telegram run summary (no-op if unconfigured)
+    try:
+        from applypilot.db import JobDatabase
+        status_stats = JobDatabase().get_status_stats()
+        from applypilot.notify import notifier
+        notifier.send_summary(
+            total=final["total"],
+            new=status_stats.get("new", 0),
+            tailored=status_stats.get("tailored", 0),
+            rejected=status_stats.get("rejected", 0),
+            **{"Scored": status_stats.get("scored", 0),
+               "Cover letters": status_stats.get("cover_lettered", 0)},
+        )
+    except Exception:
+        log.debug("Telegram summary skipped", exc_info=True)
 
     return result

@@ -83,7 +83,7 @@ def run(
             "Defaults to 'all' if omitted."
         ),
     ),
-    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for tailor/cover stages."),
+    min_score: Optional[int] = typer.Option(None, "--min-score", help="Minimum fit score for tailor/cover stages (default: MIN_FIT_SCORE env or 7)."),
     workers: int = typer.Option(1, "--workers", "-w", help="Parallel threads for discovery/enrichment stages."),
     stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
@@ -93,13 +93,17 @@ def run(
         help=(
             "Validation strictness for tailor/cover stages. "
             "strict: banned words = errors, judge must pass. "
-            "normal: banned words = warnings only (default, recommended for Gemini free tier). "
+            "normal: banned words = warnings only (default). "
             "lenient: banned words ignored, LLM judge skipped (fastest, fewest API calls)."
         ),
     ),
 ) -> None:
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
     _bootstrap()
+
+    from applypilot.config import get_min_fit_score
+    if min_score is None:
+        min_score = get_min_fit_score()
 
     from applypilot.pipeline import run_pipeline
 
@@ -144,116 +148,91 @@ def run(
 
 @app.command()
 def apply(
-    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
-    workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
-    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
-    continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
-    headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
-    url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
-    gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
+    list_only: bool = typer.Option(
+        False, "--list",
+        help="List jobs ready for manual application and exit.",
+    ),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
     reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
 ) -> None:
-    """Launch auto-apply to submit job applications."""
+    """Stage 6 (Auto-Apply) is DISABLED. Shows prepared jobs for manual application."""
     _bootstrap()
 
-    from applypilot.config import check_tier, PROFILE_PATH as _profile_path
+    from datetime import datetime, timezone
     from applypilot.database import get_connection
 
-    # --- Utility modes (no Chrome/Claude needed) ---
+    # --- Utility modes (simple DB bookkeeping, no browser automation) ---
 
     if mark_applied:
-        from applypilot.apply.launcher import mark_job
-        mark_job(mark_applied, "applied")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE jobs SET apply_status = 'applied', applied_at = ?, apply_error = NULL WHERE url = ?",
+            (datetime.now(timezone.utc).isoformat(), mark_applied),
+        )
+        conn.commit()
         console.print(f"[green]Marked as applied:[/green] {mark_applied}")
         return
 
     if mark_failed:
-        from applypilot.apply.launcher import mark_job
-        mark_job(mark_failed, "failed", reason=fail_reason)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE jobs SET apply_status = 'failed', apply_error = ?, apply_attempts = 99 WHERE url = ?",
+            (fail_reason or "manual", mark_failed),
+        )
+        conn.commit()
         console.print(f"[yellow]Marked as failed:[/yellow] {mark_failed} ({fail_reason or 'manual'})")
         return
 
     if reset_failed:
-        from applypilot.apply.launcher import reset_failed as do_reset
-        count = do_reset()
-        console.print(f"[green]Reset {count} failed job(s) for retry.[/green]")
-        return
-
-    # --- Full apply mode ---
-
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
-    check_tier(3, "auto-apply")
-
-    # Check 2: Profile exists
-    if not _profile_path.exists():
-        console.print(
-            "[red]Profile not found.[/red]\n"
-            "Run [bold]applypilot init[/bold] to create your profile first."
-        )
-        raise typer.Exit(code=1)
-
-    # Check 3: Tailored resumes exist (skip for --gen with --url)
-    if not (gen and url):
         conn = get_connection()
-        ready = conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL"
-        ).fetchone()[0]
-        if ready == 0:
-            console.print(
-                "[red]No tailored resumes ready.[/red]\n"
-                "Run [bold]applypilot run score tailor[/bold] first to prepare applications."
-            )
-            raise typer.Exit(code=1)
-
-    if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
-        target = url or ""
-        if not target:
-            console.print("[red]--gen requires --url to specify which job.[/red]")
-            raise typer.Exit(code=1)
-        prompt_file = gen_prompt(target, min_score=min_score, model=model)
-        if not prompt_file:
-            console.print("[red]No matching job found for that URL.[/red]")
-            raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
-        console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print(f"\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
+        cursor = conn.execute(
+            "UPDATE jobs SET apply_status = NULL, apply_error = NULL, apply_attempts = 0 "
+            "WHERE apply_status = 'failed' "
+            "OR (apply_status IS NOT NULL AND apply_status != 'applied' AND apply_status != 'in_progress')"
         )
+        conn.commit()
+        console.print(f"[green]Reset {cursor.rowcount} failed job(s) for retry.[/green]")
         return
 
-    from applypilot.apply.launcher import main as apply_main
+    # --- Stage 6 stub: list prepared jobs for manual application ---
+    _print_ready_jobs()
 
-    effective_limit = limit if limit is not None else (0 if continuous else 1)
-
-    console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
-    console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
-    console.print(f"  Workers:  {workers}")
-    console.print(f"  Model:    {model}")
-    console.print(f"  Headless: {headless}")
-    console.print(f"  Dry run:  {dry_run}")
-    if url:
-        console.print(f"  Target:   {url}")
-    console.print()
-
-    apply_main(
-        limit=effective_limit,
-        target_url=url,
-        min_score=min_score,
-        headless=headless,
-        model=model,
-        dry_run=dry_run,
-        continuous=continuous,
-        workers=workers,
+    console.print("\n[bold yellow][AUTO-APPLY DISABLED][/bold yellow]")
+    console.print(
+        "Stage 6 skipped. Use Hermes browser automation or apply manually. "
+        "The tailored resume and cover letter for each job above are ready in the paths listed."
     )
+
+
+def _print_ready_jobs(limit: int = 100) -> int:
+    """Print a numbered list of jobs fully prepared for manual application."""
+    from applypilot.db import JobDatabase, JOB_STATUS_COVER_LETTERED
+
+    jobs = JobDatabase().list_jobs(JOB_STATUS_COVER_LETTERED, limit=limit)
+
+    if not jobs:
+        console.print("[yellow]No jobs ready to apply yet.[/yellow]")
+        console.print("Run [bold]applypilot run[/bold] to discover, score, tailor, and write cover letters.")
+        return 0
+
+    console.print(f"\n[bold]Jobs ready for manual application ({len(jobs)})[/bold]\n")
+    for i, job in enumerate(jobs, start=1):
+        title = job.get("title") or "Untitled"
+        company = job.get("company") or job.get("site") or "?"
+        fit = job.get("fit_score")
+        fit_str = f"{fit}/10" if fit is not None else "?/10"
+        url = job.get("application_url") or job.get("url") or ""
+        resume_path = job.get("tailored_resume_path") or "n/a"
+        cover_path = job.get("cover_letter_path") or "n/a"
+        console.print(
+            f"  [bold cyan]{i}.[/bold cyan] {title} at {company} | Fit: {fit_str}\n"
+            f"       URL: {url}\n"
+            f"       Resume: {resume_path}\n"
+            f"       Cover letter: {cover_path}"
+        )
+    return len(jobs)
 
 
 @app.command()
@@ -319,7 +298,69 @@ def status() -> None:
 
         console.print(site_table)
 
+    # Pipeline status breakdown (new/scored/tailored/cover_lettered/rejected/error)
+    from applypilot.db import JobDatabase
+    status_counts = JobDatabase().get_status_stats()
+    status_table = Table(title="\nPipeline Status", show_header=True, header_style="bold green")
+    status_table.add_column("Status")
+    status_table.add_column("Count", justify="right")
+    for status, count in status_counts.items():
+        status_table.add_row(status, str(count))
+    console.print(status_table)
+
     console.print()
+
+
+@app.command("list")
+def list_jobs(
+    status: str = typer.Option(
+        "cover_lettered", "--status", "-s",
+        help=(
+            "Pipeline status to filter by: new, scored, tailored, "
+            "cover_lettered, rejected, error (default: cover_lettered = ready to apply)."
+        ),
+    ),
+    limit: int = typer.Option(50, "--limit", "-l", help="Max jobs to show (0 = all)."),
+) -> None:
+    """List jobs by pipeline status."""
+    _bootstrap()
+
+    from applypilot.db import JobDatabase, VALID_JOB_STATUSES
+
+    if status not in VALID_JOB_STATUSES:
+        console.print(
+            f"[red]Unknown status:[/red] '{status}'. "
+            f"Valid: {', '.join(sorted(VALID_JOB_STATUSES))}"
+        )
+        raise typer.Exit(code=1)
+
+    jobs = JobDatabase().list_jobs(status, limit=limit)
+
+    if not jobs:
+        console.print(f"[yellow]No jobs with status '{status}'.[/yellow]")
+        return
+
+    table = Table(title=f"Jobs [{status}] ({len(jobs)})", show_header=True, header_style="bold cyan")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Title", style="bold")
+    table.add_column("Company")
+    table.add_column("Location")
+    table.add_column("Fit", justify="center")
+    table.add_column("URL", overflow="fold", no_wrap=False)
+
+    for i, job in enumerate(jobs, start=1):
+        fit = job.get("fit_score")
+        fit_str = f"{fit}/10" if fit is not None else "-"
+        url = (job.get("application_url") or job.get("url") or "")[:80]
+        table.add_row(
+            str(i),
+            (job.get("title") or "Untitled")[:50],
+            (job.get("company") or job.get("site") or "?")[:30],
+            (job.get("location") or "")[:30],
+            fit_str,
+            url,
+        )
+    console.print(table)
 
 
 @app.command()
@@ -335,10 +376,9 @@ def dashboard() -> None:
 @app.command()
 def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
-    import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        SEARCH_CONFIG_PATH,
     )
 
     load_env()
@@ -380,53 +420,46 @@ def doctor() -> None:
 
     # --- Tier 2 checks ---
     import os
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
-        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
+    base_url = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    model = os.environ.get("LLM_MODEL", "deepseek-chat")
+
+    if base_url:
+        results.append(("LLM endpoint", ok_mark, f"{base_url} (model: {model})"))
+    elif openai_key:
+        results.append(("LLM endpoint", ok_mark, f"api.openai.com/v1 (model: {model})"))
+    elif os.environ.get("LLM_URL"):
+        results.append(("LLM endpoint", ok_mark, f"{os.environ.get('LLM_URL')} (model: {model})"))
     else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+        results.append(("LLM endpoint", fail_mark,
+                        "Set OPENAI_BASE_URL + OPENAI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
 
-    # --- Tier 3 checks ---
-    # Claude Code CLI
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        results.append(("Claude Code CLI", ok_mark, claude_bin))
-    else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+    # Connectivity test against the configured OpenAI-compatible endpoint
+    if base_url or openai_key or os.environ.get("LLM_URL"):
+        try:
+            from applypilot.llm import LLMClient
+            client = LLMClient(
+                base_url or "https://api.openai.com/v1",
+                model,
+                openai_key or os.environ.get("LLM_API_KEY", ""),
+            )
+            ping = client.ping()
+            if ping["ok"]:
+                results.append(("LLM connectivity", ok_mark, ping["detail"]))
+            else:
+                results.append(("LLM connectivity", fail_mark, ping["detail"]))
+        except Exception as e:
+            results.append(("LLM connectivity", fail_mark, f"test failed: {e}"))
 
-    # Chrome
-    try:
-        chrome_path = get_chrome_path()
-        results.append(("Chrome/Chromium", ok_mark, chrome_path))
-    except FileNotFoundError:
-        results.append(("Chrome/Chromium", fail_mark,
-                        "Install Chrome or set CHROME_PATH env var (needed for auto-apply)"))
+    # --- Tier 3 (disabled in this build) ---
+    results.append(("[dim]Stage 6 auto-apply[/dim]", "[dim]DISABLED[/dim]",
+                    "Apply manually using the prepared resumes/cover letters"))
 
-    # Node.js / npx (for Playwright MCP)
-    npx_bin = shutil.which("npx")
-    if npx_bin:
-        results.append(("Node.js (npx)", ok_mark, npx_bin))
-    else:
-        results.append(("Node.js (npx)", fail_mark,
-                        "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
-
-    # CapSolver (optional)
+    # CapSolver (unused while Stage 6 is disabled — informational)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")
     if capsolver:
-        results.append(("CapSolver API key", ok_mark, "CAPTCHA solving enabled"))
-    else:
-        results.append(("CapSolver API key", "[dim]optional[/dim]",
-                        "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))
+        results.append(("CapSolver API key", "[dim]ignored[/dim]",
+                        "Not used — auto-apply is disabled"))
 
     # --- Render results ---
     console.print()
@@ -445,12 +478,11 @@ def doctor() -> None:
     console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
 
     if tier == 1:
-        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
-    elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs OPENAI_BASE_URL + OPENAI_API_KEY)[/dim]")
 
     console.print()
+    console.print("[bold]Stage 6 (Auto-Apply):[/bold] [red]DISABLED[/red] in this build — "
+                  "apply manually using the prepared resumes and cover letters.")
 
 
 if __name__ == "__main__":

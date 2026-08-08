@@ -245,19 +245,24 @@ def _setup_ai_features() -> None:
         console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
         return
 
-    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, local (Ollama/llama.cpp)")
+    console.print(
+        "Supported providers: [bold]OpenAI-compatible[/bold] (OmniRoute, DeepSeek, "
+        "Qwen — recommended), OpenAI, local (Ollama/llama.cpp)."
+    )
     provider = Prompt.ask(
         "Provider",
-        choices=["gemini", "openai", "local"],
-        default="gemini",
+        choices=["openai-compatible", "openai", "local"],
+        default="openai-compatible",
     )
 
     env_lines = ["# ApplyPilot configuration", ""]
 
-    if provider == "gemini":
-        api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
-        model = Prompt.ask("Model", default="gemini-2.0-flash")
-        env_lines.append(f"GEMINI_API_KEY={api_key}")
+    if provider == "openai-compatible":
+        api_key = Prompt.ask("API key (any string if OmniRoute doesn't need one)")
+        base_url = Prompt.ask("Base URL", default="http://localhost:20128/v1")
+        model = Prompt.ask("Model", default="deepseek-chat")
+        env_lines.append(f"OPENAI_API_KEY={api_key}")
+        env_lines.append(f"OPENAI_BASE_URL={base_url}")
         env_lines.append(f"LLM_MODEL={model}")
     elif provider == "openai":
         api_key = Prompt.ask("OpenAI API key")
@@ -267,8 +272,16 @@ def _setup_ai_features() -> None:
     elif provider == "local":
         url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
         model = Prompt.ask("Model name", default="local-model")
-        env_lines.append(f"LLM_URL={url}")
+        env_lines.append(f"OPENAI_BASE_URL={url}")
         env_lines.append(f"LLM_MODEL={model}")
+
+    # Optional Telegram notifications
+    console.print("\n[dim]Optional: get pipeline updates in Telegram.[/dim]")
+    if Confirm.ask("Configure Telegram notifications?", default=False):
+        token = Prompt.ask("Telegram bot token (from @BotFather)")
+        chat_id = Prompt.ask("Telegram chat id")
+        env_lines.append(f"TELEGRAM_BOT_TOKEN={token}")
+        env_lines.append(f"TELEGRAM_CHAT_ID={chat_id}")
 
     env_lines.append("")
     ENV_PATH.write_text("\n".join(env_lines), encoding="utf-8")

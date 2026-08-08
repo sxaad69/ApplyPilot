@@ -12,7 +12,12 @@ import time
 from datetime import datetime, timezone
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import (
+    JOB_STATUS_ERROR,
+    get_connection,
+    get_jobs_by_stage,
+    set_job_status,
+)
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -287,7 +292,10 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
                 "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
                 (r["path"], now, r["url"]),
             )
+            set_job_status(r["url"], "cover_lettered", conn=conn)
             saved += 1
+        elif r.get("error"):
+            set_job_status(r["url"], JOB_STATUS_ERROR, conn=conn)
         else:
             conn.execute(
                 "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",

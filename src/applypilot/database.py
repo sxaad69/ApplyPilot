@@ -5,12 +5,37 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
+import hashlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from applypilot.config import DB_PATH
+
+# Pipeline status values stored in the `status` column.
+# Stages: new -> scored -> tailored -> cover_lettered
+# Terminal: rejected (below score threshold), error (failed processing)
+JOB_STATUS_NEW = "new"
+JOB_STATUS_SCORED = "scored"
+JOB_STATUS_TAILORED = "tailored"
+JOB_STATUS_COVER_LETTERED = "cover_lettered"
+JOB_STATUS_REJECTED = "rejected"
+JOB_STATUS_ERROR = "error"
+
+VALID_JOB_STATUSES = {
+    JOB_STATUS_NEW,
+    JOB_STATUS_SCORED,
+    JOB_STATUS_TAILORED,
+    JOB_STATUS_COVER_LETTERED,
+    JOB_STATUS_REJECTED,
+    JOB_STATUS_ERROR,
+}
+
+
+def job_id(url: str) -> str:
+    """Return the stable database id for a job URL (MD5 hash of the URL)."""
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
 
 # Thread-local connection storage — each thread gets its own connection
 # (required for SQLite thread safety with parallel workers)
@@ -89,6 +114,13 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn = get_connection(path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
+            id                    TEXT,
+            external_id           TEXT,
+            company               TEXT,
+            status                TEXT DEFAULT 'new',
+            created_at            TEXT,
+            updated_at            TEXT,
+
             -- Discovery stage (smart_extract / job_search)
             url                   TEXT PRIMARY KEY,
             title                 TEXT,
@@ -144,6 +176,13 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
 # This is the single source of truth. Adding a column here is all that's needed
 # for it to appear in both new databases and migrated ones.
 _ALL_COLUMNS: dict[str, str] = {
+    # Identity / status
+    "id": "TEXT",
+    "external_id": "TEXT",
+    "company": "TEXT",
+    "status": "TEXT DEFAULT 'new'",
+    "created_at": "TEXT",
+    "updated_at": "TEXT",
     # Discovery
     "url": "TEXT PRIMARY KEY",
     "title": "TEXT",
@@ -349,9 +388,10 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
             continue
         try:
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, job.get("title"), job.get("salary"), job.get("description"),
+                "INSERT INTO jobs (id, external_id, company, status, created_at, updated_at, url, title, salary, description, location, site, strategy, discovered_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id(url), job.get("external_id"), job.get("company"), JOB_STATUS_NEW,
+                 now, now, url, job.get("title"), job.get("salary"), job.get("description"),
                  job.get("location"), site, strategy, now),
             )
             new += 1
@@ -360,6 +400,82 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
 
     conn.commit()
     return new, existing
+
+
+def set_job_status(url: str, status: str, conn: sqlite3.Connection | None = None) -> None:
+    """Update the pipeline `status` for a single job by URL.
+
+    Args:
+        url: Job URL (primary key).
+        status: One of VALID_JOB_STATUSES.
+        conn: Database connection. Uses get_connection() if None.
+    """
+    if status not in VALID_JOB_STATUSES:
+        raise ValueError(f"Invalid job status: {status!r}")
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET status = ?, updated_at = ? WHERE url = ?",
+        (status, datetime.now(timezone.utc).isoformat(), url),
+    )
+    conn.commit()
+
+
+def get_status_stats(conn: sqlite3.Connection | None = None) -> dict[str, int]:
+    """Return a count of jobs per pipeline status.
+
+    Args:
+        conn: Database connection. Uses get_connection() if None.
+
+    Returns:
+        Dict mapping status -> count (all VALID_JOB_STATUSES present, 0-filled).
+    """
+    if conn is None:
+        conn = get_connection()
+
+    counts = {status: 0 for status in VALID_JOB_STATUSES}
+    rows = conn.execute(
+        "SELECT status, COUNT(*) FROM jobs GROUP BY status"
+    ).fetchall()
+    for status, count in rows:
+        if status in counts:
+            counts[status] = count
+        else:
+            counts[status] = count  # future/unknown statuses still surfaced
+    return counts
+
+
+def get_jobs_by_status(
+    status: str,
+    conn: sqlite3.Connection | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Fetch jobs filtered by pipeline status, best fit score first.
+
+    Args:
+        status: One of VALID_JOB_STATUSES (or "cover_lettered" for ready-to-apply).
+        conn: Database connection. Uses get_connection() if None.
+        limit: Maximum number of rows to return (0 = unlimited).
+
+    Returns:
+        List of job dicts.
+    """
+    if conn is None:
+        conn = get_connection()
+    query = (
+        "SELECT * FROM jobs WHERE status = ? "
+        "ORDER BY COALESCE(fit_score, 0) DESC, discovered_at DESC"
+    )
+    if limit and limit > 0:
+        query += " LIMIT ?"
+        rows = conn.execute(query, (status, limit)).fetchall()
+    else:
+        rows = conn.execute(query, (status,)).fetchall()
+
+    if not rows:
+        return []
+    columns = rows[0].keys()
+    return [dict(zip(columns, row)) for row in rows]
 
 
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,

@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from jobspy import scrape_jobs
 
 from applypilot import config
-from applypilot.database import get_connection, init_db, store_jobs
+from applypilot.database import (
+    JOB_STATUS_NEW,
+    get_connection,
+    init_db,
+    job_id,
+    store_jobs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -168,10 +174,12 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
 
         try:
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
+                "INSERT INTO jobs (id, external_id, company, status, created_at, updated_at, "
+                "url, title, salary, description, location, site, strategy, discovered_at, "
                 "full_description, application_url, detail_scraped_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, title, salary, description, location_str, site_label, strategy, now,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id(url), row.get("external_id"), company, JOB_STATUS_NEW,
+                 now, now, url, title, salary, description, location_str, site_label, strategy, now,
                  full_description, apply_url, detail_scraped_at),
             )
             new += 1

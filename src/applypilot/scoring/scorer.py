@@ -12,10 +12,19 @@ import time
 from datetime import datetime, timezone
 
 from applypilot.config import RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import (
+    JOB_STATUS_ERROR,
+    get_connection,
+    get_jobs_by_stage,
+    set_job_status,
+)
 from applypilot.llm import get_client
+from applypilot.notify import notifier
 
 log = logging.getLogger(__name__)
+
+# Default fit threshold below which a job is marked 'rejected'
+DEFAULT_MIN_SCORE = 7
 
 
 # ── Scoring Prompt ────────────────────────────────────────────────────────
@@ -101,12 +110,14 @@ def score_job(resume_text: str, job: dict) -> dict:
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
 
 
-def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
+def run_scoring(limit: int = 0, rescore: bool = False,
+                min_score: int = DEFAULT_MIN_SCORE) -> dict:
     """Score unscored jobs that have full descriptions.
 
     Args:
         limit: Maximum number of jobs to score in this run.
         rescore: If True, re-score all jobs (not just unscored ones).
+        min_score: Fit threshold. Jobs below it are marked 'rejected'.
 
     Returns:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list}
@@ -154,12 +165,30 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
 
     # Write scores to DB
     now = datetime.now(timezone.utc).isoformat()
+    rejected_jobs: list[dict] = []
     for r in results:
         conn.execute(
             "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
             (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),
         )
+        if r["score"] == 0:
+            set_job_status(r["url"], JOB_STATUS_ERROR, conn=conn)
+        elif r["score"] < min_score:
+            set_job_status(r["url"], "rejected", conn=conn)
+            rejected_jobs.append(r)
+        else:
+            set_job_status(r["url"], "scored", conn=conn)
     conn.commit()
+
+    # Notify: per-job rejected (below fit threshold)
+    for r in rejected_jobs:
+        job = next((j for j in jobs if j["url"] == r["url"]), {})
+        notifier.send_rejected(
+            title=job.get("title", "?"),
+            company=job.get("company") or job.get("site", "?"),
+            score=r["score"],
+            min_score=min_score,
+        )
 
     elapsed = time.time() - t0
     log.info("Done: %d scored in %.1fs (%.1f jobs/sec)", len(results), elapsed, len(results) / elapsed if elapsed > 0 else 0)

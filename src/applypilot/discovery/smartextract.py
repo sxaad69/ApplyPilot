@@ -30,7 +30,14 @@ from playwright.sync_api import sync_playwright
 
 from applypilot import config
 from applypilot.config import CONFIG_DIR
-from applypilot.database import get_connection, init_db, store_jobs, get_stats
+from applypilot.database import (
+    JOB_STATUS_NEW,
+    get_connection,
+    get_stats,
+    init_db,
+    job_id,
+    store_jobs,
+)
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -108,9 +115,12 @@ def _store_jobs_filtered(
             continue
         try:
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, job.get("title"), job.get("salary"), job.get("description"),
+                "INSERT INTO jobs (id, external_id, company, status, created_at, updated_at, "
+                "url, title, salary, description, location, site, strategy, discovered_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id(url), job.get("external_id"), job.get("company"),
+                 JOB_STATUS_NEW, now, now,
+                 url, job.get("title"), job.get("salary"), job.get("description"),
                  job.get("location"), site, strategy, now),
             )
             new += 1

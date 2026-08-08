@@ -17,8 +17,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import (
+    JOB_STATUS_ERROR,
+    get_connection,
+    get_jobs_by_stage,
+    set_job_status,
+)
 from applypilot.llm import get_client
+from applypilot.notify import notifier
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     FABRICATION_WATCHLIST,
@@ -565,6 +571,15 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
                 (r["path"], now, r["url"]),
             )
+            set_job_status(r["url"], "tailored", conn=conn)
+            notifier.send_tailored(
+                title=r["title"],
+                company=r.get("site", "?"),
+                score=next((j.get("fit_score") for j in jobs if j["url"] == r["url"]), None),
+                resume_path=r["path"] or "",
+            )
+        elif r["status"] == "error":
+            set_job_status(r["url"], JOB_STATUS_ERROR, conn=conn)
         else:
             conn.execute(
                 "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
