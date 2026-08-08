@@ -7,51 +7,44 @@
 # Tier 2: Strong matches, broader scope
 # Tier 3: Wide net, high volume, lower precision
 queries:
-  - query: "software engineer"
+  # Tier 1: SDET / QA exact matches (highest precision)
+  - query: "SDET"
     tier: 1
-  - query: "backend engineer"
+  - query: "software development engineer in test"
     tier: 1
-  - query: "backend developer"
+  - query: "QA engineer"
     tier: 1
-  - query: "full stack developer"
+  - query: "QA automation engineer"
+    tier: 1
+  - query: "quality engineer"
+    tier: 1
+  - query: "test automation engineer"
+    tier: 1
+  - query: "software quality engineer"
+    tier: 1
+  # Tier 2: Strong matches, broader scope
+  - query: "test engineer"
     tier: 2
-  - query: "full stack engineer"
-    tier: 2
-  - query: "python developer"
-    tier: 2
-  - query: "python engineer"
-    tier: 2
-  - query: "DevOps engineer"
-    tier: 2
-  - query: "site reliability engineer"
-    tier: 2
-  - query: "platform engineer"
-    tier: 2
-  - query: "cloud engineer"
-    tier: 2
-  - query: "data engineer"
-    tier: 2
-  - query: "infrastructure engineer"
-    tier: 2
-  - query: "software developer"
-    tier: 3
-  - query: "developer"
-    tier: 3
-  - query: "systems engineer"
-    tier: 3
   - query: "automation engineer"
+    tier: 2
+  - query: "quality assurance automation"
+    tier: 2
+  - query: "software quality assurance"
+    tier: 2
+  - query: "test automation"
+    tier: 2
+  - query: "QA lead"
+    tier: 2
+  - query: "software engineer in test"
+    tier: 2
+  # Tier 3: Wide net (SDET roles sometimes posted under these titles)
+  - query: "python developer"
     tier: 3
-  - query: "solutions engineer"
+  - query: "software engineer"
     tier: 3
-  - query: "integration engineer"
+  - query: "playwright"
     tier: 3
-  - query: "ML engineer"
-    tier: 3
-  - query: "machine learning engineer"
-    tier: 3
-  - query: "AI engineer"
-    tier: 3
-  - query: "security engineer"
+  - query: "selenium"
     tier: 3
 
 # Locations to search

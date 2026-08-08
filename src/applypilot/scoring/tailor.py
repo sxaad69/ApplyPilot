@@ -12,6 +12,7 @@ to avoid apologetic spirals.
 import json
 import logging
 import re
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -556,13 +557,14 @@ def tailor_resume(
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_tailoring(min_score: int = 7, limit: int = 20,
-                  validation_mode: str = "normal") -> dict:
+                  validation_mode: str = "normal", workers: int = 1) -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
         min_score:       Minimum fit_score to tailor for.
         limit:           Maximum jobs to process.
         validation_mode: "strict", "normal", or "lenient".
+        workers:         Concurrent LLM workers (1 = sequential).
 
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
@@ -578,14 +580,15 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
 
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
-    log.info("Tailoring resumes for %d jobs (score >= %d)...", len(jobs), min_score)
+    log.info("Tailoring resumes for %d jobs (score >= %d, workers=%d)...",
+             len(jobs), min_score, workers)
     t0 = time.time()
     completed = 0
     results: list[dict] = []
+    results_lock = threading.Lock()
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
 
-    for job in jobs:
-        completed += 1
+    def _process_one(job: dict) -> dict:
         try:
             tailored, report = tailor_resume(resume_text, job, profile,
                                              validation_mode=validation_mode)
@@ -618,59 +621,83 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             # Generate PDF for approved resumes (best-effort)
             # "approved_with_judge_warning" is also a success — resume was generated.
             pdf_path = None
+            github_url = None
             if report["status"] in ("approved", "approved_with_judge_warning"):
                 try:
                     from applypilot.scoring.pdf import convert_to_pdf
                     pdf_path = str(convert_to_pdf(txt_path))
+                    from applypilot.github_upload import upload_pdf
+                    github_url = upload_pdf(pdf_path, kind="resume")
                 except Exception:
-                    log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+                    log.debug("PDF/GitHub upload failed for %s", txt_path, exc_info=True)
 
-            result = {
+            return {
                 "url": job["url"],
                 "path": str(txt_path),
                 "pdf_path": pdf_path,
+                "github_url": github_url,
                 "title": job["title"],
                 "site": job["site"],
                 "status": report["status"],
                 "attempts": report["attempts"],
             }
         except Exception as e:
-            result = {
+            log.error("Tailor ERROR %s -- %s", job["title"][:40], e)
+            return {
                 "url": job["url"], "title": job["title"], "site": job["site"],
-                "status": "error", "attempts": 0, "path": None, "pdf_path": None,
+                "status": "error", "attempts": 0, "path": None,
+                "pdf_path": None, "github_url": None,
             }
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
-        results.append(result)
-        stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
-
-        elapsed = time.time() - t0
-        rate = completed / elapsed if elapsed > 0 else 0
-        log.info(
-            "%d/%d [%s] attempts=%s | %.1f jobs/min | %s",
-            completed, len(jobs),
-            result["status"].upper(),
-            result.get("attempts", "?"),
-            rate * 60,
-            result["title"][:40],
-        )
+    if workers > 1 and len(jobs) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_process_one, job): job for job in jobs}
+            for future in as_completed(futures):
+                job = futures[future]
+                result = future.result()
+                with results_lock:
+                    completed += 1
+                    results.append(result)
+                    stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
+                    log.info("%d/%d [%s] | %s", completed, len(jobs),
+                             result["status"].upper(), job["title"][:40])
+    else:
+        for job in jobs:
+            result = _process_one(job)
+            completed += 1
+            results.append(result)
+            stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
+            elapsed = time.time() - t0
+            rate = completed / elapsed if elapsed > 0 else 0
+            log.info(
+                "%d/%d [%s] attempts=%s | %.1f jobs/min | %s",
+                completed, len(jobs),
+                result["status"].upper(),
+                result.get("attempts", "?"),
+                rate * 60,
+                result["title"][:40],
+            )
 
     # Persist to DB: increment attempt counter for ALL, save path only for approved
     now = datetime.now(UTC).isoformat()
     _success_statuses = {"approved", "approved_with_judge_warning"}
     for r in results:
         if r["status"] in _success_statuses:
+            # Prefer the GitHub blob URL (private repo, user downloads there);
+            # fall back to the local path if upload failed.
+            stored_ref = r.get("github_url") or r.get("path")
             conn.execute(
                 "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
                 "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
+                (stored_ref, now, r["url"]),
             )
             set_job_status(r["url"], "tailored", conn=conn)
             notifier.send_tailored(
                 title=r["title"],
                 company=r.get("site", "?"),
                 score=next((j.get("fit_score") for j in jobs if j["url"] == r["url"]), None),
-                resume_path=r["path"] or "",
+                resume_path=stored_ref or "",
             )
         elif r["status"] == "error":
             set_job_status(r["url"], JOB_STATUS_ERROR, conn=conn)

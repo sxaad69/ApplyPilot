@@ -8,6 +8,7 @@ profile and resume file.
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -111,13 +112,14 @@ def score_job(resume_text: str, job: dict) -> dict:
 
 
 def run_scoring(limit: int = 0, rescore: bool = False,
-                min_score: int = DEFAULT_MIN_SCORE) -> dict:
+                min_score: int = DEFAULT_MIN_SCORE, workers: int = 1) -> dict:
     """Score unscored jobs that have full descriptions.
 
     Args:
         limit: Maximum number of jobs to score in this run.
         rescore: If True, re-score all jobs (not just unscored ones).
         min_score: Fit threshold. Jobs below it are marked 'rejected'.
+        workers: Number of concurrent LLM scoring workers (1 = sequential).
 
     Returns:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list}
@@ -142,26 +144,44 @@ def run_scoring(limit: int = 0, rescore: bool = False,
         columns = jobs[0].keys()
         jobs = [dict(zip(columns, row)) for row in jobs]
 
-    log.info("Scoring %d jobs sequentially...", len(jobs))
+    log.info("Scoring %d jobs (workers=%d)...", len(jobs), workers)
     t0 = time.time()
     completed = 0
     errors = 0
     results: list[dict] = []
+    results_lock = threading.Lock()
 
-    for job in jobs:
+    def _score_one(job):
         result = score_job(resume_text, job)
         result["url"] = job["url"]
-        completed += 1
+        return result
 
-        if result["score"] == 0:
-            errors += 1
-
-        results.append(result)
-
-        log.info(
-            "[%d/%d] score=%d  %s",
-            completed, len(jobs), result["score"], job.get("title", "?")[:60],
-        )
+    if workers > 1 and len(jobs) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_score_one, job): job for job in jobs}
+            for future in as_completed(futures):
+                result = future.result()
+                with results_lock:
+                    completed += 1
+                    if result["score"] == 0:
+                        errors += 1
+                    results.append(result)
+                    if completed % 10 == 0 or completed == len(jobs):
+                        log.info("[%d/%d] score=%d  %s",
+                                 completed, len(jobs), result["score"],
+                                 futures[future].get("title", "?")[:60])
+    else:
+        for job in jobs:
+            result = _score_one(job)
+            completed += 1
+            if result["score"] == 0:
+                errors += 1
+            results.append(result)
+            log.info(
+                "[%d/%d] score=%d  %s",
+                completed, len(jobs), result["score"], job.get("title", "?")[:60],
+            )
 
     # Write scores to DB
     now = datetime.now(timezone.utc).isoformat()

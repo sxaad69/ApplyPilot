@@ -8,6 +8,7 @@ profile at runtime. No hardcoded personal information.
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -191,13 +192,14 @@ def generate_cover_letter(
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_cover_letters(min_score: int = 7, limit: int = 20,
-                      validation_mode: str = "normal") -> dict:
+                      validation_mode: str = "normal", workers: int = 1) -> dict:
     """Generate cover letters for high-scoring jobs that have tailored resumes.
 
     Args:
         min_score:       Minimum fit_score threshold.
         limit:           Maximum jobs to process.
         validation_mode: "strict", "normal", or "lenient".
+        workers:         Concurrent LLM workers (1 = sequential).
 
     Returns:
         {"generated": int, "errors": int, "elapsed": float}
@@ -228,16 +230,16 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     log.info(
-        "Generating cover letters for %d jobs (score >= %d)...",
-        len(jobs), min_score,
+        "Generating cover letters for %d jobs (score >= %d, workers=%d)...",
+        len(jobs), min_score, workers,
     )
     t0 = time.time()
     completed = 0
     results: list[dict] = []
+    results_lock = threading.Lock()
     error_count = 0
 
-    for job in jobs:
-        completed += 1
+    def _process_one(job: dict) -> dict:
         try:
             letter = generate_cover_letter(resume_text, job, profile,
                                           validation_mode=validation_mode)
@@ -250,47 +252,73 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
             cl_path.write_text(letter, encoding="utf-8")
 
-            # Generate PDF (best-effort)
+            # Generate PDF (best-effort) + upload to private GitHub repo
             pdf_path = None
+            github_url = None
             try:
                 from applypilot.scoring.pdf import convert_to_pdf
                 pdf_path = str(convert_to_pdf(cl_path))
+                from applypilot.github_upload import upload_pdf
+                github_url = upload_pdf(pdf_path, kind="cover")
             except Exception:
-                log.debug("PDF generation failed for %s", cl_path, exc_info=True)
+                log.debug("PDF/GitHub upload failed for %s", cl_path, exc_info=True)
 
-            result = {
+            return {
                 "url": job["url"],
                 "path": str(cl_path),
                 "pdf_path": pdf_path,
+                "github_url": github_url,
                 "title": job["title"],
                 "site": job["site"],
             }
-            results.append(result)
+        except Exception as e:
+            log.error("Cover ERROR %s -- %s", job["title"][:40], e)
+            return {
+                "url": job["url"], "title": job["title"], "site": job["site"],
+                "path": None, "pdf_path": None, "github_url": None, "error": str(e),
+            }
 
+    if workers > 1 and len(jobs) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_process_one, job): job for job in jobs}
+            for future in as_completed(futures):
+                job = futures[future]
+                result = future.result()
+                with results_lock:
+                    completed += 1
+                    if result.get("error"):
+                        error_count += 1
+                    results.append(result)
+                    log.info("%d/%d [%s] | %s", completed, len(jobs),
+                             "OK" if not result.get("error") else "ERROR",
+                             job["title"][:40])
+    else:
+        for job in jobs:
+            result = _process_one(job)
+            completed += 1
+            if result.get("error"):
+                error_count += 1
+            results.append(result)
             elapsed = time.time() - t0
             rate = completed / elapsed if elapsed > 0 else 0
             log.info(
-                "%d/%d [OK] | %.1f jobs/min | %s",
-                completed, len(jobs), rate * 60, result["title"][:40],
+                "%d/%d [%s] | %.1f jobs/min | %s",
+                completed, len(jobs),
+                "OK" if not result.get("error") else "ERROR",
+                rate * 60, result["title"][:40],
             )
-        except Exception as e:
-            result = {
-                "url": job["url"], "title": job["title"], "site": job["site"],
-                "path": None, "pdf_path": None, "error": str(e),
-            }
-            error_count += 1
-            results.append(result)
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
     # Persist to DB: increment attempt counter for ALL, save path only for successes
     now = datetime.now(timezone.utc).isoformat()
     saved = 0
     for r in results:
         if r.get("path"):
+            stored_ref = r.get("github_url") or r.get("path")
             conn.execute(
                 "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
                 "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
+                (stored_ref, now, r["url"]),
             )
             set_job_status(r["url"], "cover_lettered", conn=conn)
             saved += 1
