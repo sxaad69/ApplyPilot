@@ -49,6 +49,10 @@ queries:
 
 # Locations to search
 locations:
+  - location: "Riyadh"
+    remote: false
+  - location: "Dubai"
+    remote: false
   - location: "San Francisco, CA"
     remote: false
   - location: "Remote"
@@ -57,6 +61,13 @@ locations:
 # Location filtering -- accept/reject patterns for job location text
 location:
   accept_patterns:
+    - "Riyadh"
+    - "Saudi Arabia"
+    - "Dubai"
+    - "UAE"
+    - "United Arab Emirates"
+    - "Abu Dhabi"
+    - "Gulf"
     - "San Francisco"
     - "Bay Area"
     - "SF"
