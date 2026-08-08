@@ -7,7 +7,7 @@ and exports to PDF using headless Chromium via Playwright.
 import logging
 from pathlib import Path
 
-from applypilot.config import TAILORED_DIR
+from applypilot.config import COVER_LETTER_DIR, TAILORED_DIR
 
 log = logging.getLogger(__name__)
 
@@ -391,10 +391,10 @@ def convert_to_pdf(
 
 
 def batch_convert(limit: int = 50) -> int:
-    """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
+    """Convert .txt files in TAILORED_DIR and COVER_LETTER_DIR to PDF.
 
-    Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if a
-    .pdf with the same stem already exists, and converts any that are missing.
+    Scans for .txt files (excluding _JOB.txt), checks if a .pdf with the same
+    stem already exists, and converts any that are missing.
 
     Args:
         limit: Maximum number of files to convert.
@@ -402,17 +402,18 @@ def batch_convert(limit: int = 50) -> int:
     Returns:
         Number of PDFs generated.
     """
-    if not TAILORED_DIR.exists():
-        log.warning("Tailored directory does not exist: %s", TAILORED_DIR)
+    dirs = [d for d in (TAILORED_DIR, COVER_LETTER_DIR) if d.exists()]
+    if not dirs:
+        log.warning("No tailored/cover directories exist yet.")
         return 0
 
-    txt_files = sorted(TAILORED_DIR.glob("*.txt"))
-    # Exclude _JOB.txt and _CL.txt files from resume conversion
-    # (they get their own conversion calls)
-    candidates = [
-        f for f in txt_files
-        if not f.name.endswith("_JOB.txt")
-    ]
+    candidates: list[Path] = []
+    for d in dirs:
+        candidates.extend(
+            f for f in sorted(d.glob("*.txt"))
+            if not f.name.endswith("_JOB.txt")
+        )
+    candidates = sorted(set(candidates))
 
     # Filter to those without a corresponding PDF
     to_convert: list[Path] = []
@@ -436,5 +437,5 @@ def batch_convert(limit: int = 50) -> int:
         except Exception as e:
             log.error("Failed to convert %s: %s", f.name, e)
 
-    log.info("Done: %d/%d PDFs generated in %s", converted, len(to_convert), TAILORED_DIR)
+    log.info("Done: %d/%d PDFs generated", converted, len(to_convert))
     return converted
