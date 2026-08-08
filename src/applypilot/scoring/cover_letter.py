@@ -191,7 +191,7 @@ def generate_cover_letter(
 
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
-def run_cover_letters(min_score: int = 7, limit: int = 20,
+def run_cover_letters(min_score: int = 7, limit: int = 200,
                       validation_mode: str = "normal", workers: int = 1) -> dict:
     """Generate cover letters for high-scoring jobs that have tailored resumes.
 
