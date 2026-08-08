@@ -61,6 +61,14 @@ Scrapes job boards via the `jobspy` PyPI library (`.venv/lib/python3.11/site-pac
 ### JobSpy runtime behavior observed (2026-08-08 run)
 
 - **46 search combinations** (23 queries × 2 locations) at 100 results/site, 72h window.
+- **Freshness window set to 30 days** (`hours_old: 720` in searches.yaml, 2026-08-08) —
+  LinkedIn uses `f_TPR=r2592000`, Indeed uses `dateOnIndeed=30`.
+- **Resume/watermark cursor implemented (2026-08-08):** a `discovery_cursor` table
+  (per query/location/site) stores `watermark_offset` + `last_scan_at`. On re-run:
+  recent scan → bounded fresh catch-up (watermark + 20 margin); no/stale cursor →
+  full-depth scan. Consecutive-duplicate detection (≥5 trailing dups) records the
+  frontier so restarts don't re-drain deep pages. Front pages are always re-scanned
+  so newly-posted jobs are never missed.
 - LinkedIn finished slowly; **~1-2 min per query** with description fetch enabled.
 - ZipRecruiter errored on **every** query (403).
 - **Remote-location crash bug:** when `is_remote=True`, JobSpy's `Country.from_string()`
@@ -200,10 +208,11 @@ Remaining fixes:
 5. **Vendored jobspy patch** — `Country.from_string` patch lives only in .venv; not reproducible.
    Should be vendored/re-applied on reinstall (remote jobs crash without it).
 6. **Global locations** — expand `locations:` (Dubai, Riyadh, London, Berlin, Sydney, Auckland) + accept patterns.
-7. **Strict freshness** — `hours_old` 72 → 24 (LinkedIn `f_TPR` already supports it); add a hard `posted_at` cutoff in the store path as backup.
-8. **Runtime** — concurrency plan (thread-per-source in `_run_discover`; small JobSpy pool for different sites only). See below.
+7. ~~Freshness window~~ — **DONE**: `hours_old: 720` (30 days) in searches.yaml; resume/watermark
+   cursor implemented (discovery_cursor table, consecutive-dup stop, bounded catch-up).
+8. ~~Runtime~~ — **DONE**: thread-per-source in `_run_discover` + JobSpy worker pool.
 9. **Adzuna keys** — free signup needed to enable multi-country API coverage.
-10. **sites.yaml** — SmartExtract needs one to find any targets.
+10. **sites.yaml** — SmartExtract needs one to find any targets (currently disabled anyway).
 
 ---
 

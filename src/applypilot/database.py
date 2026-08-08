@@ -166,6 +166,21 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     """)
     conn.commit()
 
+    # Per-(query, location, site) discovery progress: lets the crawler resume
+    # without re-draining deep pages. watermark_offset is where we last hit the
+    # consecutive-dup frontier; last_scan_at drives the freshness check.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discovery_cursor (
+            query            TEXT NOT NULL,
+            location         TEXT NOT NULL,
+            site             TEXT NOT NULL,
+            watermark_offset INTEGER NOT NULL DEFAULT 0,
+            last_scan_at     TEXT,
+            PRIMARY KEY (query, location, site)
+        )
+    """)
+    conn.commit()
+
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
 

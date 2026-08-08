@@ -27,6 +27,74 @@ from applypilot.database import (
 log = logging.getLogger(__name__)
 
 
+# -- Discovery cursor (resume/watermark) --------------------------------------
+
+# Consecutive duplicates that signal we've crossed the last-known frontier.
+CONSEC_DUP_STOP = 5
+# Margin past the watermark: never scan deeper than watermark + margin, so a
+# board re-ordering can't cause unbounded deep scans.
+CURSOR_MARGIN = 20
+
+
+def _get_cursor(conn, query: str, location: str, site: str) -> dict | None:
+    """Return the saved cursor for one (query, location, site) combo, or None."""
+    row = conn.execute(
+        "SELECT watermark_offset, last_scan_at FROM discovery_cursor "
+        "WHERE query = ? AND location = ? AND site = ?",
+        (query, location, site),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"watermark_offset": row["watermark_offset"], "last_scan_at": row["last_scan_at"]}
+
+
+def _set_cursor(conn, query: str, location: str, site: str,
+                watermark_offset: int, last_scan_at: str) -> None:
+    conn.execute(
+        "INSERT INTO discovery_cursor (query, location, site, watermark_offset, last_scan_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(query, location, site) DO UPDATE SET "
+        "watermark_offset = excluded.watermark_offset, "
+        "last_scan_at = excluded.last_scan_at",
+        (query, location, site, watermark_offset, last_scan_at),
+    )
+    conn.commit()
+
+
+def _resolve_results_wanted(cursor: dict | None, results_per_site: int,
+                            hours_old: int, now_iso: str) -> int:
+    """Decide how deep to scan a combo.
+
+    - No cursor / stale scan (> hours_old since last scan) -> full depth.
+    - Recent scan -> bounded: watermark + margin (fresh catch-up only).
+    """
+    if cursor is None:
+        return results_per_site
+    if cursor.get("last_scan_at") is None:
+        return results_per_site
+    from datetime import datetime
+    try:
+        last = datetime.fromisoformat(cursor["last_scan_at"])
+        age_hours = (datetime.fromisoformat(now_iso) - last).total_seconds() / 3600
+    except ValueError:
+        return results_per_site
+    if age_hours > hours_old:
+        return results_per_site
+    return max(CONSEC_DUP_STOP, cursor.get("watermark_offset", 0) + CURSOR_MARGIN)
+
+
+def _count_consecutive_dups(conn, urls: list[str]) -> int:
+    """Count how many consecutive trailing URLs already exist in the DB."""
+    count = 0
+    for url in urls:
+        exists = conn.execute("SELECT 1 FROM jobs WHERE url = ?", (url,)).fetchone()
+        if exists:
+            count += 1
+        else:
+            count = 0  # a new job breaks the run
+    return count
+
+
 # -- Proxy parsing -----------------------------------------------------------
 
 def parse_proxy(proxy_str: str) -> dict:
@@ -291,6 +359,24 @@ def _run_one_search(
     conn = get_connection()
     new, existing = store_jobspy_results(conn, df, s["query"])
 
+    # Update discovery cursors per (query, location, site): count consecutive
+    # trailing dups in the returned (newest-first) list and record the frontier.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for site in sites:
+        site_df = df[df.get("site", "").astype(str).str.lower() == site.lower()] if "site" in df.columns else df
+        urls = [
+            str(u) for u in site_df.get("job_url", [])
+            if str(u) not in ("", "nan")
+        ]
+        if urls:
+            consec = _count_consecutive_dups(conn, urls)
+            if consec >= CONSEC_DUP_STOP:
+                _set_cursor(conn, s["query"], s["location"], site,
+                            max(0, len(urls) - consec), now_iso)
+            else:
+                # Didn't cross the frontier: remember full depth scanned.
+                _set_cursor(conn, s["query"], s["location"], site, len(urls), now_iso)
+
     msg = f"[{label}] {before} results -> {new} new, {existing} dupes"
     if filtered:
         msg += f", {filtered} filtered (location)"
@@ -424,10 +510,21 @@ def _full_crawl(
 
     # Ensure DB schema is ready
     init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     def _run_one(s):
+        # Resolve how deep to scan this combo using its saved watermark.
+        # Recent scan -> bounded fresh catch-up; no/stale cursor -> full depth.
+        conn = get_connection()
+        combo_cursor = None
+        for site in sites:
+            c = _get_cursor(conn, s["query"], s["location"], site)
+            if c is not None and (combo_cursor is None or
+                                  c["watermark_offset"] > combo_cursor["watermark_offset"]):
+                combo_cursor = c
+        wanted = _resolve_results_wanted(combo_cursor, results_per_site, hours_old, now_iso)
         return _run_one_search(
-            s, sites, results_per_site, hours_old,
+            s, sites, wanted, hours_old,
             proxy_config, defaults, max_retries,
             accept_locs, reject_locs, glassdoor_map,
         )
