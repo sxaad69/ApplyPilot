@@ -175,17 +175,21 @@ class LLMClient:
                 resp = exc.response
                 if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
                     # Respect Retry-After header if provided.
+                    # Per HTTP spec Retry-After may be DELAY-SECONDS or an
+                    # HTTP-date; cap the wait so a bad value can't stall a run.
                     retry_after = (
                         resp.headers.get("Retry-After")
                         or resp.headers.get("X-RateLimit-Reset-Requests")
                     )
+                    wait = None
                     if retry_after:
                         try:
                             wait = float(retry_after)
                         except (ValueError, TypeError):
-                            wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
-                    else:
-                        wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
+                            pass
+                    if wait is None or wait < 0:
+                        wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
+                    wait = min(wait, 60)
 
                     log.warning(
                         "LLM rate limited (HTTP %s). Waiting %ds before retry %d/%d.",

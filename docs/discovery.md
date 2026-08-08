@@ -17,14 +17,20 @@ discovery run on 2026-08-08.
 ## 1. Discovery entry point & how sources stack
 
 `applypilot run discover` → `pipeline._run_discover()` runs **four sub-sources in
-sequence** (never in parallel today):
+sequence** today — the four sub-sources now run **concurrently** (thread-per-source)
+via `pipeline._run_discover()`:
 
 ```
-1. JobSpy full crawl      (discovery/jobspy.py)
-2. Workday corporate      (discovery/workday.py)
-3. SmartExtract (AI)      (discovery/smartextract.py)
-4. Free API sources       (fetchers_api.py)
+1. JobSpy full crawl      (discovery/jobspy.py)   -- also internally threaded (workers)
+2. Workday corporate      (discovery/workday.py)  -- threaded per-employer
+3. Free API sources       (fetchers_api.py)       -- Arbeitnow, RemoteOK
+4. SmartExtract (AI)      (discovery/smartextract.py)  -- DISABLED (2026-08-08)
 ```
+
+**SmartExtract is DISABLED** (2026-08-08): it scraped custom sites from a sites.yaml
+that doesn't exist → found 0 jobs, wasted LLM tokens on its judge filter, and hit a
+429 rate-limit stall (bad Retry-After header parsed as ~7h sleep — fixed in llm.py by
+capping retry wait at 60s). Re-enable only if a sites.yaml is ever created.
 
 Everything is driven by **`~/.applypilot/searches.yaml`** (via `config.load_search_config()`).
 
@@ -133,11 +139,11 @@ Pure HTTP JSON/RSS fetchers, no scraping. All normalized and deduped by URL hash
 
 | Item | Detail |
 |---|---|
-| Status | ⚠️ UNPROVEN this run (killed before reaching it) |
-| What | AI-driven extraction of job data from target sites (`build_scrape_targets`) |
-| Config | Reads `search_cfg.get("location_accept")` / `location_reject_non_remote` — 🔧 same mismatch as JobSpy |
-| LLM usage | **YES** — uses `client.ask()` at smartextract.py:406 and :655 (costs tokens; the "where are we calling LLM crazy?" map included these) |
-| Sites | Requires `sites.yaml` (`load_sites()`) — **no sites.yaml exists** (`~/.applypilot/sites.yaml` absent), so it will find **zero targets** until one is created |
+| Status | 🚫 **DISABLED 2026-08-08** |
+| What | AI-driven extraction of job data from custom target sites (`build_scrape_targets`) |
+| Why disabled | Requires `sites.yaml` (`load_sites()`) — **none exists**, so it found 0 targets; wasted LLM tokens on its judge filter; hit a 429 rate-limit stall (~7h from bad Retry-After header, since fixed) |
+| LLM usage | **YES** — uses `client.ask()` at smartextract.py:406 and :655 (this is what caused the 429) |
+| Re-enable | Only if a `sites.yaml` is ever created; code kept intact in pipeline.py (commented out) |
 
 ---
 

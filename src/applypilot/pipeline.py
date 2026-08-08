@@ -60,59 +60,74 @@ _UPSTREAM: dict[str, str | None] = {
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, smart-extract, and API sources."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None, "api": None}
+    """Stage: Job discovery — JobSpy, Workday, smart-extract, and API sources.
 
-    # JobSpy
-    console.print("  [cyan]JobSpy full crawl...[/cyan]")
-    try:
-        from applypilot.discovery.jobspy import run_discovery
-        run_discovery()
-        stats["jobspy"] = "ok"
-    except Exception as e:
-        log.error("JobSpy crawl failed: %s", e)
-        console.print(f"  [red]JobSpy error:[/red] {e}")
-        stats["jobspy"] = f"error: {e}"
+    The four sub-sources are independent (different websites/APIs) and are run
+    concurrently, one thread per source, so the slowest source bounds the stage
+    instead of their sum. Each writes via its own thread-local SQLite connection.
+    """
+    stats: dict = {"jobspy": None, "workday": None, "smartextract": "disabled", "api": None}
+    jobs_to_run = [
+        _discover_jobspy,
+        _discover_workday,
+        _discover_api,
+    ]
+    lock = threading.Lock()
 
-    # Workday corporate scraper
-    console.print("  [cyan]Workday corporate scraper...[/cyan]")
-    try:
-        from applypilot.discovery.workday import run_workday_discovery
-        run_workday_discovery(workers=workers)
-        stats["workday"] = "ok"
-    except Exception as e:
-        log.error("Workday scraper failed: %s", e)
-        console.print(f"  [red]Workday error:[/red] {e}")
-        stats["workday"] = f"error: {e}"
+    def _run(src):
+        try:
+            result = src(workers)
+            with lock:
+                stats.update(result)
+        except Exception as e:  # never let one source kill the stage
+            log.error("Discovery sub-source failed: %s", e)
 
-    # Smart extract
-    console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
-    try:
-        from applypilot.discovery.smartextract import run_smart_extract
-        run_smart_extract(workers=workers)
-        stats["smartextract"] = "ok"
-    except Exception as e:
-        log.error("Smart extract failed: %s", e)
-        console.print(f"  [red]Smart extract error:[/red] {e}")
-        stats["smartextract"] = f"error: {e}"
-
-    # Free API sources (Arbeitnow, RemoteOK, Adzuna, USAJobs, Muse, RSS)
-    console.print("  [cyan]Job API sources (Arbeitnow/RemoteOK/etc)...[/cyan]")
-    try:
-        from applypilot.fetchers_api import run_api_discovery
-        api_stats = run_api_discovery()
-        stats["api"] = (
-            f"ok: +{api_stats.get('new', 0)} new, "
-            f"{api_stats.get('existing', 0)} dupes, "
-            f"{api_stats.get('errors', 0)} source errors"
-        )
-        console.print(f"  [dim]  API: {stats['api']}[/dim]")
-    except Exception as e:
-        log.error("API discovery failed: %s", e)
-        console.print(f"  [red]API discovery error:[/red] {e}")
-        stats["api"] = f"error: {e}"
+    console.print("  [cyan]Job discovery (4 sources in parallel)...[/cyan]")
+    threads = [threading.Thread(target=_run, args=(fn,), daemon=True) for fn in jobs_to_run]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     return stats
+
+
+def _discover_jobspy(workers: int = 1) -> dict:
+    """Run JobSpy full crawl (its own concurrency). Returns partial stats."""
+    console.print("  [cyan]JobSpy full crawl...[/cyan]")
+    from applypilot.discovery.jobspy import run_discovery
+    run_discovery(workers=workers)
+    return {"jobspy": "ok"}
+
+
+def _discover_workday(workers: int = 1) -> dict:
+    """Run Workday corporate scraper."""
+    console.print("  [cyan]Workday corporate scraper...[/cyan]")
+    from applypilot.discovery.workday import run_workday_discovery
+    run_workday_discovery(workers=workers)
+    return {"workday": "ok"}
+
+
+def _discover_api(workers: int = 1) -> dict:
+    """Run free API sources (Arbeitnow, RemoteOK, Adzuna, USAJobs, Muse, RSS)."""
+    console.print("  [cyan]Job API sources (Arbeitnow/RemoteOK/etc)...[/cyan]")
+    from applypilot.fetchers_api import run_api_discovery
+    api_stats = run_api_discovery()
+    return {"api": (
+        f"ok: +{api_stats.get('new', 0)} new, "
+        f"{api_stats.get('existing', 0)} dupes, "
+        f"{api_stats.get('errors', 0)} source errors"
+    )}
+
+
+# NOTE: SmartExtract is DISABLED (2026-08-08). It scraped custom sites from a
+# sites.yaml that doesn't exist -> found 0 jobs, wasted LLM tokens on its judge,
+# and hit a 429 rate-limit stall. Re-enable only if a sites.yaml is created.
+# def _discover_smartextract(workers: int = 1) -> dict:
+#     console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
+#     from applypilot.discovery.smartextract import run_smart_extract
+#     run_smart_extract(workers=workers)
+#     return {"smartextract": "ok"}
 
 
 def _run_enrich(workers: int = 1) -> dict:

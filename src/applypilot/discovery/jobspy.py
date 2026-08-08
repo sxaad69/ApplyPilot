@@ -9,6 +9,7 @@ search configuration YAML (searches.yaml) rather than being hardcoded.
 
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -378,8 +379,16 @@ def _full_crawl(
     hours_old: int = 72,
     proxy: str | None = None,
     max_retries: int = 2,
+    workers: int = 1,
 ) -> dict:
-    """Run all search queries from search config across all locations."""
+    """Run all search queries from search config across all locations.
+
+    Queries run concurrently with a small thread pool (`workers`). Each worker
+    uses its own thread-local SQLite connection (WAL mode), and JobSpy itself
+    is thread-safe (it already runs its own internal ThreadPoolExecutor).
+    Keep `workers` small (2-4): parallel queries to the same site increase the
+    chance of bot detection / rate limiting.
+    """
     if sites is None:
         # Canonical config key `boards:`; fall back to a safe default list
         # (zip_recruiter is Cloudflare-blocked, so it's not included).
@@ -409,32 +418,53 @@ def _full_crawl(
 
     proxy_config = parse_proxy(proxy) if proxy else None
 
-    log.info("Full crawl: %d search combinations", len(searches))
+    log.info("Full crawl: %d search combinations (workers=%d)", len(searches), workers)
     log.info("Sites: %s | Results/site: %d | Hours old: %d",
              ", ".join(sites), results_per_site, hours_old)
 
     # Ensure DB schema is ready
     init_db()
 
-    total_new = 0
-    total_existing = 0
-    total_errors = 0
-    completed = 0
-
-    for s in searches:
-        result = _run_one_search(
+    def _run_one(s):
+        return _run_one_search(
             s, sites, results_per_site, hours_old,
             proxy_config, defaults, max_retries,
             accept_locs, reject_locs, glassdoor_map,
         )
-        completed += 1
-        total_new += result["new"]
-        total_existing += result["existing"]
-        total_errors += result["errors"]
 
-        if completed % 5 == 0 or completed == len(searches):
-            log.info("Progress: %d/%d queries done (%d new, %d dupes, %d errors)",
-                     completed, len(searches), total_new, total_existing, total_errors)
+    total_new = 0
+    total_existing = 0
+    total_errors = 0
+    completed = 0
+    results_lock = threading.Lock()
+
+    if workers > 1 and len(searches) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_run_one, s): s for s in searches}
+            for future in as_completed(futures):
+                result = future.result()
+                completed += 1
+                total_new += result["new"]
+                total_existing += result["existing"]
+                total_errors += result["errors"]
+                if completed % 5 == 0 or completed == len(searches):
+                    with results_lock:
+                        log.info(
+                            "Progress: %d/%d queries done (%d new, %d dupes, %d errors)",
+                            completed, len(searches), total_new,
+                            total_existing, total_errors,
+                        )
+    else:
+        for s in searches:
+            result = _run_one(s)
+            completed += 1
+            total_new += result["new"]
+            total_existing += result["existing"]
+            total_errors += result["errors"]
+            if completed % 5 == 0 or completed == len(searches):
+                log.info("Progress: %d/%d queries done (%d new, %d dupes, %d errors)",
+                         completed, len(searches), total_new, total_existing, total_errors)
 
     # Final stats
     conn = get_connection()
@@ -454,7 +484,7 @@ def _full_crawl(
 
 # -- Public entry point ------------------------------------------------------
 
-def run_discovery(cfg: dict | None = None) -> dict:
+def run_discovery(cfg: dict | None = None, workers: int = 1) -> dict:
     """Main entry point for JobSpy-based job discovery.
 
     Loads search queries and locations from the user's search config YAML,
@@ -463,6 +493,7 @@ def run_discovery(cfg: dict | None = None) -> dict:
     Args:
         cfg: Override the search configuration dict. If None, loads from
              the user's searches.yaml file.
+        workers: Number of concurrent query workers (1 = sequential).
 
     Returns:
         Dict with stats: new, existing, errors, db_total, queries.
@@ -506,4 +537,5 @@ def run_discovery(cfg: dict | None = None) -> dict:
         results_per_site=results_per_site,
         hours_old=hours_old,
         proxy=proxy,
+        workers=workers,
     )
