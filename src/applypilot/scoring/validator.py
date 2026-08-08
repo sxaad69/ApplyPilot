@@ -11,8 +11,8 @@ normal  -- banned words = warnings only; fabrication/structure = errors (default
 lenient -- banned words ignored; only fabrication and required structure checked
 """
 
-import re
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -78,9 +78,7 @@ def _build_skills_set(profile: dict) -> set[str]:
     boundary = profile.get("skills_boundary", {})
     allowed: set[str] = set()
     for category in boundary.values():
-        if isinstance(category, list):
-            allowed.update(s.lower().strip() for s in category)
-        elif isinstance(category, set):
+        if isinstance(category, list) or isinstance(category, set):
             allowed.update(s.lower().strip() for s in category)
     return allowed
 
@@ -113,8 +111,10 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Required keys — always checked regardless of mode
-    for key in ("title", "summary", "skills", "experience", "projects", "education"):
+    # Required keys — always checked regardless of mode.
+    # Lightweight schema: LLM only provides title/summary/skills/experience.
+    # Projects, education, header are preserved from the original by code.
+    for key in ("title", "summary", "skills", "experience"):
         if key not in data or not data[key]:
             errors.append(f"Missing required field: {key}")
     if errors:
@@ -137,29 +137,19 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     preserved_companies = resume_facts.get("preserved_companies", [])
 
     if isinstance(data["experience"], list):
+        # Each LLM entry is {"company": ..., "bullets": [...]}
         for company in preserved_companies:
             has_company = any(
-                company.lower() in str(e.get("header", "")).lower()
+                str(e.get("company", "")).lower().find(company.lower()) != -1
                 for e in data["experience"]
             )
             if not has_company:
                 errors.append(f"Company '{company}' missing from experience")
         for entry in data["experience"]:
+            if not isinstance(entry, dict) or not entry.get("company"):
+                errors.append("Experience entry missing 'company' field")
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)
-
-    # Projects: collect bullets
-    if isinstance(data["projects"], list):
-        for entry in data["projects"]:
-            for b in entry.get("bullets", []):
-                all_text_parts.append(b)
-
-    # Education: preserved school must be present (always enforced)
-    preserved_school = resume_facts.get("preserved_school", "")
-    if preserved_school:
-        edu = str(data.get("education", ""))
-        if preserved_school.lower() not in edu.lower():
-            errors.append(f"Education '{preserved_school}' missing")
 
     # Bulk text checks
     all_text = " ".join(all_text_parts).lower()

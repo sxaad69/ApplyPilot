@@ -50,7 +50,10 @@ MAX_PER_SOURCE = 200
 def _clean(text: str | None) -> str:
     if not text:
         return ""
-    return re.sub(r"\s+", " ", str(text)).strip()
+    s = str(text)
+    s = s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", '"')
+    s = re.sub(r"<[^>]+>", " ", s)  # strip HTML tags
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _get_json(url: str, params: dict | None = None, headers: dict | None = None) -> dict | list:

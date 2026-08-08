@@ -105,9 +105,10 @@ def test_telegram_notifier_disabled_noop():
 def test_fetch_helpers():
     from applypilot import fetchers_api
 
-    # whitespace collapse used by every fetcher
-    assert fetchers_api._clean("<p>  Build React apps  </p>") == "<p> Build React apps </p>"
+    # whitespace collapse + HTML stripping used by every fetcher
+    assert fetchers_api._clean("<p>  Build React apps  </p>") == "Build React apps"
     assert fetchers_api._clean("  Stripe  ") == "Stripe"
+    assert fetchers_api._clean("&lt;b&gt;hello&lt;/b&gt; &amp; bye") == "hello & bye"
     assert fetchers_api._clean("") == ""
     assert fetchers_api._clean(None) == ""
 

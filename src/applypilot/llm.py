@@ -76,6 +76,14 @@ _TIMEOUT = 120  # seconds
 # Base wait on first 429/503 (doubles each retry, caps at 60s).
 _RATE_LIMIT_BASE_WAIT = 10
 
+# Models that emit chain-of-thought tokens into `reasoning_content` and may
+# leave `content` empty if max_tokens is hit. We disable thinking for them.
+_REASONING_MODELS = ("deepseek", "qwen", "thinking", "big-pickle", "reasoning")
+
+
+def _uses_reasoning_tokens(model: str) -> bool:
+    return any(tag in model.lower() for tag in _REASONING_MODELS)
+
 
 class LLMClient:
     """Thin OpenAI-compatible chat completions client with retry/backoff."""
@@ -106,6 +114,12 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
 
+        # Reasoning models (DeepSeek free tier, Qwen, etc.) burn their whole
+        # token budget on hidden chain-of-thought and may return empty content.
+        # Disable thinking for structured extraction so content is emitted.
+        if _uses_reasoning_tokens(self.model):
+            payload["thinking"] = {"type": "disabled"}
+
         resp = self._client.post(
             f"{self.base_url}/chat/completions",
             json=payload,
@@ -117,7 +131,20 @@ class LLMClient:
     @staticmethod
     def _handle_compat_response(resp: httpx.Response) -> str:
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        content = message.get("content")
+        if content:
+            return content
+        # Some reasoning models (e.g. DeepSeek free tier) emit tokens in
+        # reasoning_content and leave content empty when max_tokens is hit.
+        reasoning = message.get("reasoning_content") or ""
+        if reasoning:
+            log.warning(
+                "LLM returned empty content; falling back to reasoning_content (%d chars).",
+                len(reasoning),
+            )
+            return reasoning
+        return ""
 
     # -- public API ---------------------------------------------------------
 
@@ -128,12 +155,17 @@ class LLMClient:
         max_tokens: int = 4096,
     ) -> str:
         """Send a chat completion request and return the assistant message text."""
-        # Qwen3 optimization: prepend /no_think to skip chain-of-thought
-        # reasoning, saving tokens on structured extraction tasks.
-        if "qwen" in self.model.lower() and messages:
-            first = messages[0]
-            if first.get("role") == "user" and not first["content"].startswith("/no_think"):
-                messages = [{"role": first["role"], "content": f"/no_think\n{first['content']}"}] + messages[1:]
+        # Optimization: prepend /no_think to the first user message to skip
+        # chain-of-thought reasoning on reasoning-capable models (Qwen3,
+        # DeepSeek free tier). Saves tokens and dramatically reduces latency
+        # on structured extraction tasks.
+        if messages and _uses_reasoning_tokens(self.model):
+            for i, m in enumerate(messages):
+                if m.get("role") == "user" and not m["content"].startswith("/no_think"):
+                    messages = messages[:i] + [
+                        {**m, "content": f"/no_think\n{m['content']}"}
+                    ] + messages[i + 1:]
+                    break
 
         for attempt in range(_MAX_RETRIES):
             try:

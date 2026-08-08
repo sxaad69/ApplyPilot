@@ -13,8 +13,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import (
@@ -27,10 +26,8 @@ from applypilot.llm import get_client
 from applypilot.notify import notifier
 from applypilot.scoring.validator import (
     BANNED_WORDS,
-    FABRICATION_WATCHLIST,
     sanitize_text,
     validate_json_fields,
-    validate_tailored_resume,
 )
 
 log = logging.getLogger(__name__)
@@ -43,8 +40,10 @@ MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 def _build_tailor_prompt(profile: dict) -> str:
     """Build the resume tailoring system prompt from the user's profile.
 
-    All skills boundaries, preserved entities, and formatting rules are
-    derived from the profile -- nothing is hardcoded.
+    Lightweight schema: the LLM only rewrites what changes (title, summary,
+    skills order, experience bullets). All fixed facts -- header, contact,
+    company names/roles/dates, projects, education -- are preserved verbatim
+    from the original resume by code. Nothing here is hardcoded personal data.
     """
     boundary = profile.get("skills_boundary", {})
     resume_facts = profile.get("resume_facts", {})
@@ -59,24 +58,19 @@ def _build_tailor_prompt(profile: dict) -> str:
 
     # Preserved entities
     companies = resume_facts.get("preserved_companies", [])
-    projects = resume_facts.get("preserved_projects", [])
-    school = resume_facts.get("preserved_school", "")
     real_metrics = resume_facts.get("real_metrics", [])
 
     companies_str = ", ".join(companies) if companies else "N/A"
-    projects_str = ", ".join(projects) if projects else "N/A"
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
 
     # Include ALL banned words from the validator so the LLM knows exactly
     # what will be rejected — the validator checks for these automatically.
     banned_str = ", ".join(BANNED_WORDS)
 
-    education = profile.get("experience", {})
-    education_level = education.get("education_level", "")
+    return f"""You are a senior technical recruiter tailoring a resume to get this person an interview.
 
-    return f"""You are a senior technical recruiter rewriting a resume to get this person an interview.
-
-Take the base resume and job description. Return a tailored resume as a JSON object.
+Only the four fields below are rewritten for the target job. Everything else is handled by code:
+company names, roles, dates, locations, contact info, education, and projects are kept EXACTLY as in the ORIGINAL RESUME. Do NOT touch them.
 
 ## RECRUITER SCAN (6 seconds):
 1. Title -- matches what they're hiring?
@@ -89,19 +83,17 @@ Take the base resume and job description. Return a tailored resume as a JSON obj
 
 You MAY add 2-3 closely related tools (Kubernetes if Docker, Terraform if AWS, Redis if PostgreSQL). No unrelated languages/frameworks.
 
-## TAILORING RULES:
-
+## RULES:
 TITLE: Match the target role. Keep seniority (Senior/Lead/Staff). Drop company suffixes and team names.
 
 SUMMARY: Rewrite from scratch. Lead with the 1-2 skills that matter most for THIS role. Sound like someone who's done this job.
 
-SKILLS: Reorder each category so the job's must-haves appear first.
+SKILLS: Reorder each category so the job's must-haves appear first. Only reorder/trim -- do not invent categories.
 
-Reframe EVERY bullet for this role. Same real work, different angle. Every bullet must be reworded. Never copy verbatim.
+BULLETS: For EVERY company listed below, rewrite that role's bullets for this role. Same real work, different angle, incorporating the job's required skills where the work genuinely supports it. Never copy verbatim. Max 4 bullets per role. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Optimized).
 
-PROJECTS: Reorder by relevance. Drop irrelevant projects entirely.
-
-BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Operated, Optimized). Most relevant first. Max 4 per section.
+## COMPANIES -- output bullets for exactly these, keep the same order:
+{companies_str}
 
 ## VOICE:
 - Write like a real engineer. Short, direct.
@@ -114,13 +106,12 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 ## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
 - Do NOT change real numbers ({metrics_str})
-- Preserved companies: {companies_str} -- names stay as-is
-- Preserved school: {school}
+- Do NOT add, remove, or rename companies
 - Must fit 1 page.
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
-{{"title":"Role Title","summary":"2-3 tailored sentences.","skills":{{"Languages":"...","Frameworks":"...","DevOps & Infra":"...","Databases":"...","Tools":"..."}},"experience":[{{"header":"Title at Company","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2","bullet 3","bullet 4"]}}],"projects":[{{"header":"Project Name - Description","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2"]}}],"education":"{school} | {education_level}"}}"""
+{{"title":"Role Title","summary":"2-3 tailored sentences.","skills":{{"Languages":"...","Frameworks":"...","DevOps & Infra":"...","Databases":"...","Tools":"..."}},"experience":[{{"company":"NTG Clarity Networks","bullets":["bullet 1","bullet 2","bullet 3"]}}]}}"""
 
 
 def _build_judge_prompt(profile: dict) -> str:
@@ -226,42 +217,133 @@ def extract_json(raw: str) -> dict:
 
 # ── Resume Assembly (profile-driven header) ──────────────────────────────
 
-def assemble_resume_text(data: dict, profile: dict) -> str:
+_SECTION_ALIASES = {
+    "experience": ("professional experience", "work experience", "experience"),
+    "projects": ("key projects", "projects", "selected projects"),
+    "education": ("education", "academic background"),
+}
+
+
+def _parse_resume_sections(resume_text: str) -> dict[str, str]:
+    """Split original resume into named sections by matching section headers.
+
+    Returns {"experience": str, "projects": str, "education": str, "rest": str}.
+    Content before the first known header becomes "rest" (header/tagline/contact).
+    """
+    lines = resume_text.splitlines()
+    sections: dict[str, list[str]] = {}
+    order: list[str] = []
+
+    def header_of(line: str) -> str | None:
+        stripped = line.strip().lower()
+        for key, aliases in _SECTION_ALIASES.items():
+            if any(a == stripped for a in aliases):
+                return key
+        return None
+
+    current = "rest"
+    for line in lines:
+        key = header_of(line)
+        if key is not None:
+            current = key
+            if key not in order:
+                order.append(key)
+            continue  # the header line itself is not section content
+        sections.setdefault(current, []).append(line)
+    out = {k: "\n".join(v).strip() for k, v in sections.items() if k != "rest"}
+    # The resume header block is the first ~5 non-empty lines (name, title,
+    # tagline, location, contact). Content before the first known section.
+    rest = "\n".join(sections.get("rest", [])).strip()
+    non_empty = [ln for ln in rest.splitlines() if ln.strip()]
+    out["rest"] = "\n".join(non_empty[:5]).strip()
+    return out
+
+
+def _parse_experience_roles(experience_block: str) -> list[dict]:
+    """Parse an experience section into roles.
+
+    Structure in the original resume: a role header line, then a subtitle line
+    that always contains '|' (company | location | dates), then bullet lines
+    (plain paragraphs, not dash-prefixed). A plain line whose NEXT line contains
+    '|' is a role header; every other plain line is a bullet.
+    Returns [{"header":..., "subtitle":..., "bullets":[...]}, ...].
+    """
+    lines = [ln.strip() for ln in experience_block.splitlines() if ln.strip()]
+    roles: list[dict] = []
+    for i, ln in enumerate(lines):
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if "|" in ln or "@" in ln:
+            roles.append({"header": "", "subtitle": ln, "bullets": []})
+        elif nxt and ("|" in nxt or "@" in nxt):
+            roles.append({"header": ln, "subtitle": "", "bullets": []})
+        elif roles:
+            roles[-1]["bullets"].append(ln)
+        else:
+            roles.append({"header": ln, "subtitle": "", "bullets": []})
+    # Merge a header role with its following subtitle role into one entry.
+    merged: list[dict] = []
+    for role in roles:
+        if merged and role["header"] == "" and role["subtitle"] and not merged[-1]["subtitle"]:
+            merged[-1]["subtitle"] = role["subtitle"]
+            merged[-1]["bullets"].extend(role["bullets"])
+        else:
+            merged.append(dict(role))
+    # Drop stray roles that have no company subtitle (e.g. a bare section title).
+    return [r for r in merged if r["subtitle"]]
+
+
+def _match_role(roles: list[dict], company: str) -> dict | None:
+    """Find the role whose header/subtitle mentions the company (fuzzy)."""
+    c = company.lower()
+    for role in roles:
+        haystack = f"{role.get('header', '')} {role.get('subtitle', '')}".lower()
+        if c in haystack:
+            return role
+    return None
+
+
+def assemble_resume_text(data: dict, profile: dict, original_text: str = "") -> str:
     """Convert JSON resume data to formatted plain text.
 
-    Header (name, location, contact) is ALWAYS code-injected from the profile,
-    never LLM-generated. All text fields are sanitized.
+    Header (name, location, contact), education, and projects are ALWAYS taken
+    from the original resume / profile -- never LLM-generated. Only title,
+    summary, skills, and experience bullets come from the LLM.
 
     Args:
         data: Parsed JSON resume from the LLM.
         profile: User profile dict from load_profile().
+        original_text: Original base resume (fixed sections preserved verbatim).
 
     Returns:
         Formatted resume text.
     """
     personal = profile.get("personal", {})
+    sections = _parse_resume_sections(original_text)
+    roles = _parse_experience_roles(sections.get("experience", ""))
     lines: list[str] = []
 
     # Header -- always code-injected from profile
     lines.append(personal.get("full_name", ""))
     lines.append(sanitize_text(data.get("title", "Software Engineer")))
 
-    # Location from search config or profile -- leave blank if not available
-    # The location line is optional; the original used a hardcoded city.
-    # We omit it here; the LLM prompt can include it if the user sets it.
-
-    # Contact line
-    contact_parts: list[str] = []
-    if personal.get("email"):
-        contact_parts.append(personal["email"])
-    if personal.get("phone"):
-        contact_parts.append(personal["phone"])
-    if personal.get("github_url"):
-        contact_parts.append(personal["github_url"])
-    if personal.get("linkedin_url"):
-        contact_parts.append(personal["linkedin_url"])
-    if contact_parts:
-        lines.append(" | ".join(contact_parts))
+    # Tagline / location / contact preserved from original resume if present
+    rest_lines = [ln.strip() for ln in sections.get("rest", "").splitlines() if ln.strip()]
+    if rest_lines:
+        # Skip the original name/title (replaced above), keep the rest.
+        lines.extend(rest_lines[2:])
+    else:
+        # Contact line
+        contact_parts: list[str] = []
+        if personal.get("email"):
+            contact_parts.append(personal["email"])
+        if personal.get("phone"):
+            contact_parts.append(personal["phone"])
+        if personal.get("github_url"):
+            contact_parts.append(personal["github_url"])
+        if personal.get("linkedin_url"):
+            contact_parts.append(personal["linkedin_url"])
+        if contact_parts:
+            lines.append(" | ".join(contact_parts))
     lines.append("")
 
     # Summary
@@ -276,31 +358,43 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
             lines.append(f"{cat}: {sanitize_text(str(val))}")
     lines.append("")
 
-    # Experience
+    # Experience -- fixed headers/subtitles from original, LLM bullets
     lines.append("EXPERIENCE")
+    llm_by_company = {}
     for entry in data.get("experience", []):
-        lines.append(sanitize_text(entry.get("header", "")))
-        if entry.get("subtitle"):
-            lines.append(sanitize_text(entry["subtitle"]))
-        for b in entry.get("bullets", []):
-            lines.append(f"- {sanitize_text(b)}")
+        if isinstance(entry, dict):
+            comp = entry.get("company", "")
+            llm_by_company[comp] = entry.get("bullets", [])
+    for role in roles:
+        lines.append(sanitize_text(role.get("header", "")))
+        if role.get("subtitle"):
+            lines.append(sanitize_text(role["subtitle"]))
+        # Use LLM bullets if we can match the role's company, else original
+        matched = None
+        for company, bullets in llm_by_company.items():
+            if company and _match_role([role], company):
+                matched = bullets
+                break
+        bullets = matched or role.get("bullets", [])
+        for b in bullets:
+            if b.strip():
+                lines.append(f"- {sanitize_text(b)}")
         lines.append("")
 
-    # Projects
-    lines.append("PROJECTS")
-    for entry in data.get("projects", []):
-        lines.append(sanitize_text(entry.get("header", "")))
-        if entry.get("subtitle"):
-            lines.append(sanitize_text(entry["subtitle"]))
-        for b in entry.get("bullets", []):
-            lines.append(f"- {sanitize_text(b)}")
+    # Projects -- preserved verbatim from original
+    projects = sections.get("projects", "")
+    if projects:
+        lines.append("PROJECTS")
+        lines.append(projects)
         lines.append("")
 
-    # Education
-    lines.append("EDUCATION")
-    lines.append(sanitize_text(str(data.get("education", ""))))
+    # Education -- preserved verbatim from original
+    education = sections.get("education", "")
+    if education:
+        lines.append("EDUCATION")
+        lines.append(education)
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 # ── LLM Judge ────────────────────────────────────────────────────────────
@@ -332,7 +426,7 @@ def judge_tailored_resume(
     ]
 
     client = get_client()
-    response = client.chat(messages, max_tokens=512, temperature=0.1)
+    response = client.chat(messages, max_tokens=1024, temperature=0.1)
 
     passed = "VERDICT: PASS" in response.upper()
     issues = "none"
@@ -406,7 +500,7 @@ def tailor_resume(
             {"role": "user", "content": f"ORIGINAL RESUME:\n{resume_text}\n\n---\n\nTARGET JOB:\n{job_text}\n\nReturn the JSON:"},
         ]
 
-        raw = client.chat(messages, max_tokens=2048, temperature=0.4)
+        raw = client.chat(messages, max_tokens=8192, temperature=0.4)
 
         # Parse JSON from response
         try:
@@ -425,12 +519,12 @@ def tailor_resume(
             if attempt < max_retries:
                 continue
             # Last attempt — assemble whatever we got
-            tailored = assemble_resume_text(data, profile)
+            tailored = assemble_resume_text(data, profile, resume_text)
             report["status"] = "failed_validation"
             return tailored, report
 
         # Assemble text (header injected by code, em dashes auto-fixed)
-        tailored = assemble_resume_text(data, profile)
+        tailored = assemble_resume_text(data, profile, resume_text)
 
         # Layer 2: LLM judge (catches subtle fabrication) — skipped in lenient mode
         if validation_mode == "lenient":
@@ -562,7 +656,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         )
 
     # Persist to DB: increment attempt counter for ALL, save path only for approved
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     _success_statuses = {"approved", "approved_with_judge_warning"}
     for r in results:
         if r["status"] in _success_statuses:

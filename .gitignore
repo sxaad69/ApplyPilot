@@ -2,6 +2,7 @@
 profile.json
 resume.txt
 resume.pdf
+ownresume/
 *.env
 .env.*
 !.env.example
