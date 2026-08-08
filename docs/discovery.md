@@ -36,16 +36,21 @@ Scrapes job boards via the `jobspy` PyPI library (`.venv/lib/python3.11/site-pac
 
 ### Source matrix (JobSpy library scrapers present)
 
+> **Verification probes run 2026-08-08** — every board tested with `results_wanted=5`.
+> All non-working sources were **commented out** in searches.yaml `boards:` (code kept
+> intact, re-enable later to re-test). See §9.
+
 | Board | Site key | Status | Evidence / notes |
 |---|---|---|---|
-| LinkedIn | `linkedin` | ✅ WORKING | **56 jobs** in DB from run. Slow (~2 min/query). Uses `linkedin_fetch_description=True` to get descriptions during scrape (LinkedIn pages are login-walled for the enrich stage). |
-| Indeed | `indeed` | ✅ WORKING | **33 jobs** in DB. Needs per-location `country_indeed` for non-US global search (see §8, currently a single `country: USA`). |
-| ZipRecruiter | `zip_recruiter` | ❌ FAILED | **HTTP 403 forbidden** on every request — Cloudflare anti-bot (error body `{"error_code":"forbidden aa",...}` + `CFRAY` header). **Removed from searches.yaml boards on 2026-08-08.** |
-| Glassdoor | `glassdoor` | ⚠️ UNPROVEN | In boards list but run was killed before reaching it. Known fragile / bot-blocked in the wild. Glassdoor requires simplified location via `glassdoor_location_map`. |
-| Google | `google` | ⚠️ UNPROVEN | In boards list; never observed to run. |
-| Bayt | `bayt` | 💤 DORMANT | Scraper EXISTS in jobspy lib (`Site.BAYT`, `jobspy/bayt/`). **Not in boards list.** This is the key MENA (Gulf) source — Bayt is native UAE/KSA. Country controlled by the location string passed to its scraper. |
-| Naukri | `naukri` | 💤 DORMANT | Scraper exists in lib (`Site.NAUKRI`). India-focused. Not configured. |
-| BDJobs | `bdjobs` | 💤 DORMANT | Scraper exists in lib (`Site.BDJOBS`). Bangladesh-focused. Not configured. |
+| LinkedIn | `linkedin` | ✅ WORKING | **56 jobs** in DB. Probe: 5/5. Slow (~2 min/query). Uses `linkedin_fetch_description=True` to get descriptions during scrape (LinkedIn pages are login-walled for the enrich stage). |
+| Indeed | `indeed` | ✅ WORKING | **33 jobs** in DB. Probe: 5/5. Needs per-location `country_indeed` for non-US global search (see §8, currently a single `country: USA`). |
+| ZipRecruiter | `zip_recruiter` | ❌ FAILED | **HTTP 403 forbidden** every request — Cloudflare anti-bot (`{"error_code":"forbidden aa",...}` + `CFRAY`). **Commented out** in boards 2026-08-08. |
+| Glassdoor | `glassdoor` | ❌ FAILED | **Not a location problem.** Location lookup `findPopularLocationAjax.htm` → 400 for every string (SF/Berlin/London/Dubai/Remote/US); hardcoded remote-location ID bypass → 403 on the GraphQL job search. Anti-bot blocks the scraper entirely. **Commented out.** Only path = residential proxy or newer scraper. |
+| Google | `google` | ❌ FAILED | Probe: **0 jobs** (returns nothing, no error). **Commented out.** |
+| Bayt | `bayt` | ❌ FAILED | Probe: **403 Forbidden** on `bayt.com/en/international/...` for all locations incl. Dubai/Riyadh. Anti-bot. MENA source — **commented out**; re-test with proxy later. |
+| Naukri | `naukri` | ❌ FAILED | Probe: **406 recaptcha required**. **Commented out.** |
+| BDJobs | `bdjobs` | ❌ FAILED | Probe: library bug — `BDJobs.__init__() got an unexpected keyword argument 'user_agent'`. **Commented out.** |
+| Bayt/Naukri/BDJobs scrapers | — | 💤 DORMANT | Code still present in jobspy lib; disabled in config. |
 
 ### JobSpy runtime behavior observed (2026-08-08 run)
 
@@ -170,16 +175,24 @@ Not a "source," but needed to understand where descriptions come from.
 
 ---
 
-## 9. Pending fixes (from this audit)
+## 9. Status & pending fixes (as of 2026-08-08 verification)
 
-1. **🔧 Fix config mismatch** — searches.yaml uses `boards:`, `location.accept_patterns`,
-   `location.reject_patterns`, top-level `country`; code reads `sites`, `location_accept`,
-   `location_reject_non_remote`, `defaults.country_indeed`, `location_labels`, `tiers`.
-   Either rename yaml keys to match code, or update code to read the yaml keys.
-2. **Bayt** — add `bayt` to boards for MENA (after config fix so it's actually read).
+**VERIFIED WORKING (kept enabled):** LinkedIn, Indeed (jobspy); Arbeitnow, RemoteOK (API).
+
+**VERIFIED FAILED (commented out in config, code kept — re-test later):**
+Glassdoor, Google, Bayt, Naukri, BDJobs (jobspy); ZipRecruiter.
+**DORMANT / UNVERIFIED (need keys or config):** Adzuna, USAJobs, Muse (API keys empty),
+RSS (no feeds), Workday (no employer URLs), SmartExtract (no sites.yaml).
+
+Remaining fixes:
+1. ~~Fix config mismatch~~ — **DONE (commit 03a1465)**: code now reads `boards:`,
+   `location.accept_patterns/reject_patterns`, top-level `country`.
+2. **Bayt for MENA** — commented out (403 anti-bot). Re-enable + test with a
+   residential proxy later; it's the key Gulf source.
 3. **Per-location country** — for global Indeed, pass country per location (currently one global).
-4. **ZipRecruiter** — removed from `boards:`; also should be removed from JobSpy default fallback list (`sites = ["indeed","linkedin","zip_recruiter"]` at jobspy.py:380).
-5. **Venved jobspy patch** — `Country.from_string` patch is not reproducible; document or vendor it.
+4. **ZipRecruiter** — commented out; also excluded from JobSpy fallback site lists (jobspy.py).
+5. **Vendored jobspy patch** — `Country.from_string` patch lives only in .venv; not reproducible.
+   Should be vendored/re-applied on reinstall (remote jobs crash without it).
 6. **Global locations** — expand `locations:` (Dubai, Riyadh, London, Berlin, Sydney, Auckland) + accept patterns.
 7. **Strict freshness** — `hours_old` 72 → 24 (LinkedIn `f_TPR` already supports it); add a hard `posted_at` cutoff in the store path as backup.
 8. **Runtime** — concurrency plan (thread-per-source in `_run_discover`; small JobSpy pool for different sites only). See below.
@@ -200,12 +213,12 @@ Not a "source," but needed to understand where descriptions come from.
 
 ## 11. Untested / never-run inventory (explicit)
 
-- Glassdoor (jobspy) — never completed a run
-- Google (jobspy) — never observed
-- Bayt, Naukri, BDJobs (jobspy) — dormant scrapers, never configured
-- Adzuna, USAJobs, The Muse — keys never set
-- RSS fetcher — no feeds configured
+- Adzuna, USAJobs, The Muse — keys never set (dormant, unverified)
+- RSS fetcher — no feeds configured (one probe URL failed: malformed feed)
 - Workday — never reached in a run; no employer URLs configured
 - SmartExtract — never reached; no sites.yaml
+- JobSpy with a proxy — no proxy configured (would unlock Glassdoor/Bayt/ZipRecruiter?)
+- `applypilot run --stream` (concurrent stage mode) — exists in pipeline.py, never exercised
+- `glassdoor_location_map` config key — never used (Glassdoor disabled before it mattered)
 - JobSpy with a proxy — no proxy configured
 - `applypilot run --stream` (concurrent stage mode) — exists in pipeline.py, never exercised

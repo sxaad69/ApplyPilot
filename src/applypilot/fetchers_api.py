@@ -349,7 +349,15 @@ def rss_feed_urls() -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _all_fetchers() -> list[tuple[str, callable]]:
-    """Return configured fetchers: (name, callable)."""
+    """Return configured fetchers: (name, callable).
+
+    Verified working 2026-08-08: Arbeitnow + RemoteOK (no keys).
+    Adzuna / USAJobs / Muse are dormant -- they only activate when their
+    env keys are set. Keys were empty during verification, so they are
+    UNVERIFIED, not failing. Re-enable by setting the keys in ~/.applypilot/.env.
+    RSS feeds only activate when feeds are configured (RSS_FEEDS env or
+    searches.yaml api_sources.rss); none configured -> dormant.
+    """
     fetchers: list[tuple[str, callable]] = [
         ("Arbeitnow", fetch_arbeitnow),
         ("RemoteOK", fetch_remoteok),

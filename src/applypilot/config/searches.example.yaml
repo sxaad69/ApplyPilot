@@ -85,13 +85,18 @@ location:
 # Country for Indeed/LinkedIn/Google Jobs searches
 country: "USA"
 
-# JobSpy source boards (all available options shown)
+# JobSpy source boards (only WORKING sources enabled).
+# Verified working 2026-08-08: indeed, linkedin (jobspy); arbeitnow, remoteok (API).
+# Commented out / disabled (keep code, re-enable later to re-test):
+#   - glassdoor  # DROPPED 2026-08-08: anti-bot blocks all locations (400/403). Re-test later w/ proxy.
+#   - google     # DROPPED 2026-08-08: returns 0 jobs. Re-test later.
+#   - bayt       # DROPPED 2026-08-08: 403 anti-bot (MENA source). Re-test later w/ proxy.
+#   - naukri     # DROPPED 2026-08-08: 406 recaptcha required.
+#   - bdjobs     # DROPPED 2026-08-08: library bug (unexpected user_agent kwarg).
+#   - zip_recruiter  # DROPPED 2026-08-08: 403 Cloudflare anti-bot.
 boards:
   - indeed
   - linkedin
-  - glassdoor
-  - zip_recruiter
-  - google
 
 # Search defaults
 defaults:
