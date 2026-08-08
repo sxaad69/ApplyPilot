@@ -85,11 +85,14 @@ def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0)
 def _load_location_config(search_cfg: dict) -> tuple[list[str], list[str]]:
     """Extract accept/reject location lists from search config.
 
-    Falls back to sensible defaults if not defined in the YAML.
+    Canonical keys: `location.accept_patterns` / `location.reject_patterns`.
+    Falls back to the legacy flat keys `location_accept` /
+    `location_reject_non_remote` if the nested form isn't present.
     """
-    accept = search_cfg.get("location_accept", [])
-    reject = search_cfg.get("location_reject_non_remote", [])
-    return accept, reject
+    loc_cfg = search_cfg.get("location", {}) or {}
+    accept = loc_cfg.get("accept_patterns") or search_cfg.get("location_accept", [])
+    reject = loc_cfg.get("reject_patterns") or search_cfg.get("location_reject_non_remote", [])
+    return accept or [], reject or []
 
 
 def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> bool:
@@ -309,7 +312,8 @@ def search_jobs(
 ) -> dict:
     """Run a single job search via JobSpy and store results in DB."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        # zip_recruiter is Cloudflare-blocked, so exclude from default.
+        sites = ["indeed", "linkedin"]
 
     proxy_config = parse_proxy(proxy) if proxy else None
 
@@ -377,7 +381,9 @@ def _full_crawl(
 ) -> dict:
     """Run all search queries from search config across all locations."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        # Canonical config key `boards:`; fall back to a safe default list
+        # (zip_recruiter is Cloudflare-blocked, so it's not included).
+        sites = search_cfg.get("boards") or ["indeed", "linkedin"]
 
     # Build search combinations from config
     queries = search_cfg.get("queries", [])
@@ -469,11 +475,28 @@ def run_discovery(cfg: dict | None = None) -> dict:
         return {"new": 0, "existing": 0, "errors": 0, "db_total": 0, "queries": 0}
 
     proxy = cfg.get("proxy")
-    sites = cfg.get("sites")
+    # Canonical key is `boards:` (list). Legacy alias `sites:` also honored.
+    sites = cfg.get("boards") or cfg.get("sites")
     results_per_site = cfg.get("defaults", {}).get("results_per_site", 100)
     hours_old = cfg.get("defaults", {}).get("hours_old", 72)
     tiers = cfg.get("tiers")
-    locations = cfg.get("location_labels")
+
+    # Country for Indeed/LinkedIn/Google. Canonical top-level key `country`,
+    # with legacy `defaults.country_indeed` fallback.
+    defaults = dict(cfg.get("defaults", {}))
+    defaults.setdefault("country_indeed", cfg.get("country", "usa"))
+
+    # locations filter: canonical `locations` list entries use `label`;
+    # otherwise pass None (search all configured locations).
+    locations = None
+    if cfg.get("locations"):
+        labels = [
+            loc.get("label")
+            for loc in cfg.get("locations", [])
+            if loc.get("label")
+        ]
+        if labels:
+            locations = labels
 
     return _full_crawl(
         search_cfg=cfg,
