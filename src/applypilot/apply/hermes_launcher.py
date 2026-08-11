@@ -20,6 +20,87 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 
+def _build_candidate_profile() -> str:
+    """Build a rich candidate profile block from profile.json + resume.txt.
+
+    Gives the agent real answers for any form field — education, work
+    authorization, years of experience, current employer, skills, etc. — so it
+    doesn't guess or bail on common screening questions.
+    """
+    from applypilot.config import RESUME_PATH, load_profile
+
+    lines: list[str] = []
+    try:
+        profile = load_profile()
+    except Exception:
+        profile = {}
+
+    p = profile.get("personal", {})
+    lines.append("## CANDIDATE PROFILE (use this to fill the form)")
+    lines.append(f"- Full Name: {p.get('full_name', '')}")
+    if p.get("preferred_name"):
+        lines.append(f"- Preferred Name: {p['preferred_name']}")
+    lines.append(f"- Email: {p.get('email', '')}")
+    if p.get("phone"):
+        lines.append(f"- Phone: {p['phone']}")
+    loc = ", ".join(x for x in [p.get("city", ""), p.get("province_state", ""), p.get("country", "")] if x)
+    if loc:
+        lines.append(f"- Current Location: {loc}")
+    for url_key, label in (("linkedin_url", "LinkedIn"), ("github_url", "GitHub"),
+                           ("portfolio_url", "Portfolio"), ("website_url", "Website")):
+        if p.get(url_key):
+            lines.append(f"- {label}: {p[url_key]}")
+
+    # Work authorization + availability
+    wa = profile.get("work_authorization", {})
+    if wa.get("legally_authorized_to_work"):
+        lines.append(f"- Work Authorization: Legally authorized to work = {wa['legally_authorized_to_work']}")
+    if wa.get("work_permit_type"):
+        lines.append(f"- Work Permit Type: {wa['work_permit_type']}")
+    avail = profile.get("availability", {})
+    if avail.get("earliest_start_date"):
+        lines.append(f"- Earliest Start Date: {avail['earliest_start_date']}")
+    if avail.get("available_for_full_time"):
+        lines.append(f"- Available Full-Time: {avail['available_for_full_time']}")
+    if avail.get("available_for_contract"):
+        lines.append(f"- Available Contract: {avail['available_for_contract']}")
+
+    # Experience + education
+    exp = profile.get("experience", {})
+    if exp.get("years_of_experience_total"):
+        lines.append(f"- Years of Experience: {exp['years_of_experience_total']}")
+    if exp.get("education_level"):
+        lines.append(f"- Education Level: {exp['education_level']}")
+    if exp.get("current_job_title"):
+        lines.append(f"- Current Job Title: {exp['current_job_title']}")
+    if exp.get("current_company"):
+        lines.append(f"- Current Employer: {exp['current_company']}")
+    if exp.get("target_role"):
+        lines.append(f"- Target Role: {exp['target_role']}")
+
+    # Skills boundary
+    skills = profile.get("skills_boundary", {})
+    if skills:
+        parts = []
+        for cat, items in skills.items():
+            if isinstance(items, list) and items:
+                parts.append(f"{cat.replace('_', ' ').title()}: {', '.join(items)}")
+        if parts:
+            lines.append("- Skills:")
+            for part in parts:
+                lines.append(f"    {part}")
+
+    # Resume summary (first ~800 chars) so it can answer experience-depth questions
+    try:
+        resume_text = RESUME_PATH.read_text(encoding="utf-8")
+        lines.append("- Resume Overview:")
+        lines.append("    " + resume_text[:800].replace("\n", " "))
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
 def _build_prompt(job: dict, resume_pdf: str, dry_run: bool = False) -> str:
     """Build the Hermes prompt: skill invocation + job data + strict JSON return.
 
@@ -43,6 +124,8 @@ def _build_prompt(job: dict, resume_pdf: str, dry_run: bool = False) -> str:
         f"Job: {job.get('title')} at {job.get('site')}",
         f"Application URL: {job.get('application_url') or job.get('url')}",
         f"Resume PDF: {resume_pdf}",
+        "",
+        _build_candidate_profile(),
         "",
         "After completing, return EXACTLY ONE JSON object per the skill format.",
         "Do not add any text outside the JSON.",
