@@ -49,40 +49,179 @@ queries:
 
 # Locations to search
 locations:
+  # ── Gulf / MENA (highest priority) ──
   - location: "Riyadh"
+    remote: false
+  - location: "Jeddah"
     remote: false
   - location: "Dubai"
     remote: false
+  - location: "Abu Dhabi"
+    remote: false
+  - location: "Doha"
+    remote: false
+  - location: "Kuwait City"
+    remote: false
+  - location: "Manama"
+    remote: false
+  - location: "Muscat"
+    remote: false
+  # ── Europe ──
+  - location: "London"
+    remote: false
+  - location: "Manchester"
+    remote: false
+  - location: "Berlin"
+    remote: false
+  - location: "Munich"
+    remote: false
+  - location: "Frankfurt"
+    remote: false
+  - location: "Amsterdam"
+    remote: false
+  - location: "Paris"
+    remote: false
+  - location: "Dublin"
+    remote: false
+  - location: "Zurich"
+    remote: false
+  - location: "Madrid"
+    remote: false
+  - location: "Barcelona"
+    remote: false
+  - location: "Milan"
+    remote: false
+  - location: "Stockholm"
+    remote: false
+  - location: "Copenhagen"
+    remote: false
+  - location: "Warsaw"
+    remote: false
+  # ── United States ──
   - location: "San Francisco, CA"
     remote: false
+  - location: "New York, NY"
+    remote: false
+  - location: "Seattle, WA"
+    remote: false
+  - location: "Austin, TX"
+    remote: false
+  - location: "Boston, MA"
+    remote: false
+  - location: "Chicago, IL"
+    remote: false
+  - location: "Denver, CO"
+    remote: false
+  - location: "Los Angeles, CA"
+    remote: false
+  # ── Australia / New Zealand ──
+  - location: "Sydney"
+    remote: false
+  - location: "Melbourne"
+    remote: false
+  - location: "Brisbane"
+    remote: false
+  - location: "Perth"
+    remote: false
+  - location: "Auckland"
+    remote: false
+  - location: "Wellington"
+    remote: false
+  # ── Remote (global) ──
   - location: "Remote"
     remote: true
 
 # Location filtering -- accept/reject patterns for job location text
 location:
   accept_patterns:
+    # Gulf / MENA
     - "Riyadh"
     - "Saudi Arabia"
+    - "KSA"
+    - "Jeddah"
+    - "Dammam"
     - "Dubai"
+    - "Abu Dhabi"
+    - "Sharjah"
     - "UAE"
     - "United Arab Emirates"
-    - "Abu Dhabi"
+    - "Doha"
+    - "Qatar"
+    - "Kuwait"
+    - "Manama"
+    - "Bahrain"
+    - "Muscat"
+    - "Oman"
     - "Gulf"
+    - "Middle East"
+    - "MENA"
+    # Europe
+    - "London"
+    - "United Kingdom"
+    - "UK"
+    - "Manchester"
+    - "Berlin"
+    - "Germany"
+    - "Munich"
+    - "Frankfurt"
+    - "Amsterdam"
+    - "Netherlands"
+    - "Paris"
+    - "France"
+    - "Dublin"
+    - "Ireland"
+    - "Zurich"
+    - "Switzerland"
+    - "Madrid"
+    - "Barcelona"
+    - "Spain"
+    - "Milan"
+    - "Italy"
+    - "Stockholm"
+    - "Sweden"
+    - "Copenhagen"
+    - "Denmark"
+    - "Warsaw"
+    - "Poland"
+    - "Europe"
+    # United States
     - "San Francisco"
     - "Bay Area"
     - "SF"
     - "California"
     - "CA"
-    - "Remote"
-    - "Anywhere"
+    - "New York"
+    - "NY"
+    - "Seattle"
+    - "Austin"
+    - "Texas"
+    - "TX"
+    - "Boston"
+    - "Massachusetts"
+    - "Chicago"
+    - "Illinois"
+    - "Denver"
+    - "Colorado"
+    - "Los Angeles"
     - "United States"
     - "US"
     - "USA"
+    # Australia / New Zealand
+    - "Sydney"
+    - "Melbourne"
+    - "Brisbane"
+    - "Perth"
+    - "Australia"
+    - "Auckland"
+    - "Wellington"
+    - "New Zealand"
+    # Remote
+    - "Remote"
+    - "Anywhere"
+    - "Worldwide"
+    - "Global"
   reject_patterns:
-    - "New York only"
-    - "Seattle only"
     - "onsite only"
-    - "London, UK"
     - "India"
     - "Philippines"
 
@@ -105,7 +244,7 @@ boards:
 # Search defaults
 defaults:
   results_per_site: 100  # Max results per board per query
-  hours_old: 720         # Only jobs posted within this many hours (720 = 30 days)
+  hours_old: 168         # Only jobs posted within this many hours (168 = 7 days)
 
 # Negative keywords -- skip jobs with these in the title (case-insensitive)
 exclude_titles:
