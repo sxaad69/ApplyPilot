@@ -152,12 +152,16 @@ def apply(
         False, "--list",
         help="List jobs ready for manual application and exit.",
     ),
+    limit: int = typer.Option(1, "--limit", help="Max jobs to apply to."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fill + upload but do NOT submit."),
+    engine: str = typer.Option("hermes", "--engine", help="'hermes' (Playwright MCP) or 'claude'."),
+    workers: int = typer.Option(1, "--workers", "-w", help="Parallel workers."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
     reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
 ) -> None:
-    """Stage 6 (Auto-Apply) is DISABLED. Shows prepared jobs for manual application."""
+    """Auto-apply to prepared jobs via Hermes + Playwright MCP."""
     _bootstrap()
 
     from datetime import datetime, timezone
@@ -196,14 +200,13 @@ def apply(
         console.print(f"[green]Reset {cursor.rowcount} failed job(s) for retry.[/green]")
         return
 
-    # --- Stage 6 stub: list prepared jobs for manual application ---
-    _print_ready_jobs()
+    if list_only:
+        _print_ready_jobs()
+        return
 
-    console.print("\n[bold yellow][AUTO-APPLY DISABLED][/bold yellow]")
-    console.print(
-        "Stage 6 skipped. Use Hermes browser automation or apply manually. "
-        "The tailored resume and cover letter for each job above are ready in the paths listed."
-    )
+    # --- Auto-apply via Hermes + Playwright MCP ---
+    from applypilot.apply.launcher import main as apply_main
+    apply_main(limit=limit, dry_run=dry_run, engine=engine, workers=workers)
 
 
 def _print_ready_jobs(limit: int = 100) -> int:

@@ -545,10 +545,63 @@ def _is_permanent_failure(result: str) -> bool:
 # Worker loop
 # ---------------------------------------------------------------------------
 
+def _run_with_engine(job: dict, worker_id: int, model: str,
+                     dry_run: bool, engine: str) -> tuple[str, int]:
+    """Run one job apply through the selected engine.
+
+    engine="hermes" -> Hermes + Playwright MCP (default, strict JSON outcome).
+    engine="claude"  -> legacy Claude Code path (run_job).
+
+    Returns (status_string, duration_ms). Status matches the existing
+    contract: "applied", "failed:reason", "skipped", "dry_run".
+    """
+    if engine == "claude":
+        from applypilot.apply.launcher import run_job
+        return run_job(job, port=BASE_CDP_PORT + worker_id,
+                       worker_id=worker_id, model=model, dry_run=dry_run)
+
+    # Hermes engine
+    from applypilot.apply.hermes_launcher import apply_one_hermes
+    resume_pdf = _resolve_resume_pdf(job)
+    status, detail = apply_one_hermes(
+        job, resume_pdf, worker_id=worker_id, dry_run=dry_run,
+    )
+    return status, detail.get("duration_ms", 0)
+
+
+def _resolve_resume_pdf(job: dict) -> str:
+    """Locate the tailored resume PDF for a job.
+
+    tailored_resume_path may be a GitHub URL (from the upload step) or a local
+    path. Prefer the local PDF if it exists, else fall back to the standard
+    tailored dir naming.
+    """
+    from applypilot.config import TAILORED_DIR
+    pdf_path = job.get("tailored_resume_path")
+    if pdf_path and str(pdf_path).startswith("http"):
+        pdf_path = None
+    if pdf_path and Path(pdf_path).exists():
+        return str(pdf_path)
+    if pdf_path:
+        # may be the .txt path; look for sibling PDF
+        p = Path(pdf_path).with_suffix(".pdf")
+        if p.exists():
+            return str(p)
+    # fall back to naming convention: {site}_{title}.pdf in TAILORED_DIR
+    import re as _re
+    safe_title = _re.sub(r"[^\w\s-]", "", job.get("title", ""))[:50].strip().replace(" ", "_")
+    safe_site = _re.sub(r"[^\w\s-]", "", job.get("site", ""))[:20].strip().replace(" ", "_")
+    candidate = TAILORED_DIR / f"{safe_site}_{safe_title}.pdf"
+    if candidate.exists():
+        return str(candidate)
+    return ""
+
+
 def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
-                model: str = "sonnet", dry_run: bool = False) -> tuple[int, int]:
+                model: str = "sonnet", dry_run: bool = False,
+                engine: str = "hermes") -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -557,8 +610,9 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome headless.
-        model: Claude model name.
+        model: Agent model name (legacy Claude path).
         dry_run: Don't click Submit.
+        engine: "hermes" (Hermes + Playwright MCP, default) or "claude".
 
     Returns:
         Tuple of (applied_count, failed_count).
@@ -598,16 +652,22 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
         chrome_proc = None
         try:
-            add_event(f"[W{worker_id}] Launching Chrome...")
-            chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            if engine == "claude":
+                add_event(f"[W{worker_id}] Launching Chrome...")
+                chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
-            result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run)
+            result, duration_ms = _run_with_engine(
+                job, worker_id=worker_id, model=model, dry_run=dry_run,
+                engine=engine,
+            )
 
             if result == "skipped":
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
                 continue
+            elif result == "dry_run":
+                add_event(f"[W{worker_id}] Dry-run OK: {job['title'][:30]}")
+                update_state(worker_id, last_action="dry_run complete")
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
@@ -653,15 +713,26 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, continuous: bool = False,
-         poll_interval: int = 60, workers: int = 1) -> None:
-    """Stage 6 (Auto-Apply) is DISABLED in this build.
+         poll_interval: int = 60, workers: int = 1,
+         engine: str = "hermes") -> None:
+    """Stage 6 (Auto-Apply) via the selected engine.
 
-    Kept as a no-op stub so any legacy imports do not launch Claude Code /
-    Playwright browser automation. Manual application is the intended flow.
+    engine="hermes" -> Hermes + Playwright MCP (default). Runs the apply loop.
+    engine="claude"  -> legacy Claude Code path (also runs).
     """
-    console = Console()
-    console.print(
-        "\n[bold yellow][AUTO-APPLY DISABLED][/bold yellow]\n"
-        "Stage 6 skipped. Use Hermes browser automation or apply manually. "
-        "Run `applypilot apply --list` to see prepared jobs."
-    )
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if workers > 1:
+        futures = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for wid in range(workers):
+                futures.append(pool.submit(
+                    worker_loop, wid, limit=limit, target_url=target_url,
+                    min_score=min_score, headless=headless, model=model,
+                    dry_run=dry_run, engine=engine,
+                ))
+            for f in as_completed(futures):
+                f.result()
+    else:
+        worker_loop(0, limit=limit, target_url=target_url, min_score=min_score,
+                    headless=headless, model=model, dry_run=dry_run, engine=engine)

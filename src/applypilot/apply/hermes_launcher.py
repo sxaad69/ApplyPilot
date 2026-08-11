@@ -13,23 +13,32 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import subprocess
 import time
 from datetime import datetime
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 
 def _build_prompt(job: dict, resume_pdf: str, dry_run: bool = False) -> str:
-    """Build the Hermes prompt: skill invocation + job data + strict JSON return."""
+    """Build the Hermes prompt: skill invocation + job data + strict JSON return.
+
+    Explicitly names the Playwright MCP tools so the model uses them (they
+    launch their own browser) rather than Hermes' native browser_cdp tool
+    (which points at a possibly-dead CDP endpoint).
+    """
     lines = ["/apply-to-ats", ""]
     if dry_run:
         lines.append("DRY RUN: fill and upload but DO NOT submit.")
     else:
         lines.append("Submit this application.")
     lines += [
+        "",
+        "Use the Playwright MCP browser tools ONLY (tools named mcp__playwright__*).",
+        "Do NOT use browser_cdp, browser_navigate (native), or any native browser tools.",
+        "For navigation use mcp__playwright__browser_navigate.",
+        "For uploading the resume use mcp__playwright__browser_file_upload with the resume path.",
+        "For filling fields use mcp__playwright__browser_fill_form or mcp__playwright__browser_type.",
         "",
         f"Job: {job.get('title')} at {job.get('site')}",
         f"Application URL: {job.get('application_url') or job.get('url')}",
@@ -89,17 +98,18 @@ def apply_one_hermes(job: dict, resume_pdf: str, worker_id: int = 0,
         (status_string, detail) where detail includes confirmation_text, error,
         screenshot, and duration_ms.
     """
-    from applypilot.apply.dashboard import add_event, update_state, get_state
     from applypilot.apply.chrome import reset_worker_dir
+    from applypilot.apply.dashboard import add_event, update_state
 
     prompt = _build_prompt(job, resume_pdf, dry_run=dry_run)
 
     # Hermes CLI — same profile/config as the gateway (uses Playwright MCP).
     hermes_bin = os.environ.get("HERMES_BIN", "hermes")
+    # Ensure hermes (in ~/.local/bin) and npx (in /usr/local/bin) are on PATH.
+    local_bin = os.path.expanduser("~/.local/bin")
     cmd = [
         hermes_bin,
         "chat", "-q", prompt,
-        "--toolsets", "browser",
     ]
 
     worker_dir = reset_worker_dir(worker_id)
@@ -119,7 +129,8 @@ def apply_one_hermes(job: dict, resume_pdf: str, worker_id: int = 0,
             errors="replace",
             timeout=timeout,
             cwd=str(worker_dir),
-            env={**os.environ, "PATH": "/usr/local/bin:" + os.environ.get("PATH", "")},
+            check=False,
+            env={**os.environ, "PATH": f"{local_bin}:/usr/local/bin:{os.environ.get('PATH', '')}"},
         )
         output = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
@@ -153,7 +164,7 @@ def _persist_to_db(job: dict, status: str, detail: dict) -> None:
     from applypilot.database import get_connection
 
     conn = get_connection()
-    now = datetime.now().isoformat()
+    now = datetime.now().astimezone().isoformat()
     url = job.get("url")
     if not url:
         return
