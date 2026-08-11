@@ -669,13 +669,13 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 add_event(f"[W{worker_id}] Dry-run OK: {job['title'][:30]}")
                 update_state(worker_id, last_action="dry_run complete")
             elif result == "applied":
-                mark_result(job["url"], "applied", duration_ms=duration_ms)
+                mark_result(job.get("application_url") or job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
                 update_state(worker_id, jobs_applied=applied,
                              jobs_done=applied + failed)
             else:
                 reason = result.split(":", 1)[-1] if ":" in result else result
-                mark_result(job["url"], "failed", reason,
+                mark_result(job.get("application_url") or job["url"], "failed", reason,
                             permanent=_is_permanent_failure(result),
                             duration_ms=duration_ms)
                 failed += 1

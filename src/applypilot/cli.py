@@ -153,6 +153,7 @@ def apply(
         help="List jobs ready for manual application and exit.",
     ),
     limit: int = typer.Option(1, "--limit", help="Max jobs to apply to."),
+    target_url: Optional[str] = typer.Option(None, "--target-url", help="Apply to a specific job URL."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Fill + upload but do NOT submit."),
     engine: str = typer.Option("hermes", "--engine", help="'hermes' (Playwright MCP) or 'claude'."),
     workers: int = typer.Option(1, "--workers", "-w", help="Parallel workers."),
@@ -206,7 +207,8 @@ def apply(
 
     # --- Auto-apply via Hermes + Playwright MCP ---
     from applypilot.apply.launcher import main as apply_main
-    apply_main(limit=limit, dry_run=dry_run, engine=engine, workers=workers)
+    apply_main(limit=limit, target_url=target_url, dry_run=dry_run,
+               engine=engine, workers=workers)
 
 
 def _print_ready_jobs(limit: int = 100) -> int:

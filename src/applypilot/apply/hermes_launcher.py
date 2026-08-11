@@ -165,14 +165,17 @@ def _persist_to_db(job: dict, status: str, detail: dict) -> None:
 
     conn = get_connection()
     now = datetime.now().astimezone().isoformat()
-    url = job.get("url")
+    # Match by application_url if present (target-url applies find jobs by
+    # application_url), else by the canonical url.
+    match_col = "application_url" if job.get("application_url") else "url"
+    url = job.get("application_url") or job.get("url")
     if not url:
         return
     apply_status = "applied" if status == "applied" else ("error" if status.startswith("failed") else status)
     conn.execute(
-        "UPDATE jobs SET apply_status=?, applied_at=?, apply_error=?, "
-        "apply_attempts=COALESCE(apply_attempts,0)+1, apply_duration_ms=?, "
-        "agent_id='hermes', screenshot_path=? WHERE url=?",
+        f"UPDATE jobs SET apply_status=?, applied_at=?, apply_error=?, "
+        f"apply_attempts=COALESCE(apply_attempts,0)+1, apply_duration_ms=?, "
+        f"agent_id='hermes', screenshot_path=? WHERE {match_col}=?",
         (apply_status, now if status == "applied" else None,
          detail.get("error") or detail.get("confirmation_text"), detail.get("duration_ms"),
          detail.get("screenshot"), url),
