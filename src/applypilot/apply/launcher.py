@@ -111,7 +111,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -572,28 +572,45 @@ def _run_with_engine(job: dict, worker_id: int, model: str,
 def _resolve_resume_pdf(job: dict) -> str:
     """Locate the tailored resume PDF for a job.
 
-    tailored_resume_path may be a GitHub URL (from the upload step) or a local
-    path. Prefer the local PDF if it exists, else fall back to the standard
-    tailored dir naming.
+    The DB's tailored_resume_path is authoritative: it's either a local .txt/.pdf
+    path or a GitHub blob URL. When it's a GitHub URL, find the matching local
+    PDF by the same clean stem (the upload and local file share the name), or
+    scan the local tailored dir by job id.
     """
     from applypilot.config import TAILORED_DIR
     pdf_path = job.get("tailored_resume_path")
-    if pdf_path and str(pdf_path).startswith("http"):
-        pdf_path = None
-    if pdf_path and Path(pdf_path).exists():
-        return str(pdf_path)
-    if pdf_path:
-        # may be the .txt path; look for sibling PDF
-        p = Path(pdf_path).with_suffix(".pdf")
+
+    # Local path case
+    if pdf_path and not str(pdf_path).startswith("http"):
+        p = Path(pdf_path)
         if p.exists():
             return str(p)
-    # fall back to naming convention: {site}_{title}.pdf in TAILORED_DIR
+        alt = p.with_suffix(".pdf")
+        if alt.exists():
+            return str(alt)
+
+    # GitHub URL case: extract the clean filename and find the local PDF by stem.
+    if pdf_path and str(pdf_path).startswith("http"):
+        from urllib.parse import unquote
+        clean_stem = Path(unquote(str(pdf_path).split("/")[-1])).stem
+        candidate = TAILORED_DIR / f"{clean_stem}.pdf"
+        if candidate.exists():
+            return str(candidate)
+
+    # Fallback: search local tailored dir by job id folder or clean title.
+    from applypilot.database import job_id as _job_hash
+    job_folder = TAILORED_DIR / _job_hash(job.get("url", ""))
+    if job_folder.exists():
+        pdfs = list(job_folder.glob("*.pdf"))
+        if pdfs:
+            return str(pdfs[0])
+
+    # Last resort: any PDF whose name starts with the job title.
     import re as _re
     safe_title = _re.sub(r"[^\w\s-]", "", job.get("title", ""))[:50].strip().replace(" ", "_")
-    safe_site = _re.sub(r"[^\w\s-]", "", job.get("site", ""))[:20].strip().replace(" ", "_")
-    candidate = TAILORED_DIR / f"{safe_site}_{safe_title}.pdf"
-    if candidate.exists():
-        return str(candidate)
+    for candidate in TAILORED_DIR.glob("*.pdf"):
+        if safe_title in candidate.stem:
+            return str(candidate)
     return ""
 
 

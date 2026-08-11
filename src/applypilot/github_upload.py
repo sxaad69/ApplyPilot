@@ -50,16 +50,23 @@ def _ensure_repo() -> None:
             "--description", "ApplyPilot generated resumes + cover letters")
 
 
-def upload_pdf(local_path: str | Path, kind: str = "resume") -> str:
+def upload_pdf(local_path: str | Path, kind: str = "resume",
+               job_key: str | None = None) -> str:
     """Upload a PDF to the private repo and return its GitHub blob URL.
 
     The repo is PRIVATE, so raw.githubusercontent.com 404s without auth.
     Returning the GitHub blob URL is correct here — the user is authenticated
     via `gh` and can open/download it directly in the GitHub UI.
 
+    Files are stored under a folder named by `job_key` (e.g. the job URL hash),
+    so the filename itself stays clean ("Saad Ullah Suri - QA Lead.pdf") with
+    no collision concerns between different jobs.
+
     Args:
         local_path: Absolute path to the PDF file.
         kind: "resume" or "cover" — selects the repo subfolder.
+        job_key: Unique per-job identifier used as the folder name. Falls back
+                 to the local file stem if not provided.
 
     Returns:
         GitHub blob URL (https://github.com/.../blob/main/...) for download.
@@ -71,9 +78,12 @@ def upload_pdf(local_path: str | Path, kind: str = "resume") -> str:
     subdir = RESUME_DIR if kind == "resume" else COVER_DIR
     _ensure_repo()
 
-    # Unique-ish filename: job-derived stem + short hash to avoid collisions.
-    stem = path.stem
-    remote_path = f"{subdir}/{stem}.pdf"
+    # Folder-per-job structure: {subdir}/{job_id}/{clean_name}.pdf
+    # The job_id folder guarantees uniqueness, so the filename stays clean
+    # (e.g. "Saad Ullah Suri - QA Lead.pdf") with no collision concerns.
+    job_id = job_key or path.stem[:12]
+    clean_name = path.stem  # e.g. "Saad Ullah Suri - QA Lead"
+    remote_path = f"{subdir}/{job_id}/{clean_name}.pdf"
 
     # If the file already exists, GitHub requires the current blob sha to update.
     existing_sha = None

@@ -410,7 +410,7 @@ def batch_convert(limit: int = 50) -> int:
     candidates: list[Path] = []
     for d in dirs:
         candidates.extend(
-            f for f in sorted(d.glob("*.txt"))
+            f for f in sorted(d.rglob("*.txt"))
             if not f.name.endswith("_JOB.txt")
         )
     candidates = sorted(set(candidates))

@@ -593,17 +593,23 @@ def run_tailoring(min_score: int = 7, limit: int = 200,
             tailored, report = tailor_resume(resume_text, job, profile,
                                              validation_mode=validation_mode)
 
-            # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
+            # Clean, professional filename: "{Name} - {JobTitle}"
+            # (no company, no site). Stored in a per-job folder named by the
+            # job's URL hash so names never collide across jobs.
+            from applypilot.database import job_id as _job_hash
+            candidate_name = (profile.get("personal", {}) or {}).get("full_name", "Candidate")
+            safe_candidate = re.sub(r"[^\w\s-]", "", candidate_name).strip().replace(" ", "-")
+            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "-")
+            clean_name = f"{safe_candidate} - {safe_title}"
+            job_folder = TAILORED_DIR / _job_hash(job["url"])
+            job_folder.mkdir(parents=True, exist_ok=True)
 
             # Save tailored resume text
-            txt_path = TAILORED_DIR / f"{prefix}.txt"
+            txt_path = job_folder / f"{clean_name}.txt"
             txt_path.write_text(tailored, encoding="utf-8")
 
             # Save job description for traceability
-            job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
+            job_path = job_folder / f"{clean_name}_JOB.txt"
             job_desc = (
                 f"Title: {job['title']}\n"
                 f"Company: {job['site']}\n"
@@ -615,7 +621,7 @@ def run_tailoring(min_score: int = 7, limit: int = 200,
             job_path.write_text(job_desc, encoding="utf-8")
 
             # Save validation report
-            report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
+            report_path = job_folder / f"{clean_name}_REPORT.json"
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
             # Generate PDF for approved resumes (best-effort)
@@ -627,7 +633,8 @@ def run_tailoring(min_score: int = 7, limit: int = 200,
                     from applypilot.scoring.pdf import convert_to_pdf
                     pdf_path = str(convert_to_pdf(txt_path))
                     from applypilot.github_upload import upload_pdf
-                    github_url = upload_pdf(pdf_path, kind="resume")
+                    from applypilot.database import job_id as _job_hash
+                    github_url = upload_pdf(pdf_path, kind="resume", job_key=_job_hash(job["url"]))
                 except Exception:
                     log.debug("PDF/GitHub upload failed for %s", txt_path, exc_info=True)
 

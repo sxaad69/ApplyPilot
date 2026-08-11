@@ -244,12 +244,17 @@ def run_cover_letters(min_score: int = 7, limit: int = 200,
             letter = generate_cover_letter(resume_text, job, profile,
                                           validation_mode=validation_mode)
 
-            # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
+            # Clean, professional filename: "{Name} - {JobTitle} - Cover Letter"
+            # in a per-job folder named by the job's URL hash.
+            from applypilot.database import job_id as _job_hash
+            candidate_name = (profile.get("personal", {}) or {}).get("full_name", "Candidate")
+            safe_candidate = re.sub(r"[^\w\s-]", "", candidate_name).strip().replace(" ", "-")
+            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "-")
+            clean_name = f"{safe_candidate} - {safe_title} - Cover Letter"
+            job_folder = COVER_LETTER_DIR / _job_hash(job["url"])
+            job_folder.mkdir(parents=True, exist_ok=True)
 
-            cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+            cl_path = job_folder / f"{clean_name}.txt"
             cl_path.write_text(letter, encoding="utf-8")
 
             # Generate PDF (best-effort) + upload to private GitHub repo
@@ -259,7 +264,8 @@ def run_cover_letters(min_score: int = 7, limit: int = 200,
                 from applypilot.scoring.pdf import convert_to_pdf
                 pdf_path = str(convert_to_pdf(cl_path))
                 from applypilot.github_upload import upload_pdf
-                github_url = upload_pdf(pdf_path, kind="cover")
+                from applypilot.database import job_id as _job_hash
+                github_url = upload_pdf(pdf_path, kind="cover", job_key=_job_hash(job["url"]))
             except Exception:
                 log.debug("PDF/GitHub upload failed for %s", cl_path, exc_info=True)
 
