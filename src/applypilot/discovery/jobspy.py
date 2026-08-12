@@ -469,6 +469,7 @@ def _full_crawl(
     proxy: str | None = None,
     max_retries: int = 2,
     workers: int = 1,
+    query_delay: float = 0.0,
 ) -> dict:
     """Run all search queries from search config across all locations.
 
@@ -541,7 +542,12 @@ def _full_crawl(
     if workers > 1 and len(searches) > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_run_one, s): s for s in searches}
+            # Submit all with a stagger so parallel workers don't fire at once.
+            futures = {}
+            for i, s in enumerate(searches):
+                if query_delay > 0 and i > 0:
+                    time.sleep(query_delay / workers)
+                futures[pool.submit(_run_one, s)] = s
             for future in as_completed(futures):
                 result = future.result()
                 completed += 1
@@ -565,6 +571,9 @@ def _full_crawl(
             if completed % 5 == 0 or completed == len(searches):
                 log.info("Progress: %d/%d queries done (%d new, %d dupes, %d errors)",
                          completed, len(searches), total_new, total_existing, total_errors)
+            # Throttle: slow the crawl down to avoid rate-limit / anti-bot.
+            if query_delay > 0 and completed < len(searches):
+                time.sleep(query_delay)
 
     # Final stats
     conn = get_connection()
@@ -584,7 +593,8 @@ def _full_crawl(
 
 # -- Public entry point ------------------------------------------------------
 
-def run_discovery(cfg: dict | None = None, workers: int = 1) -> dict:
+def run_discovery(cfg: dict | None = None, workers: int = 1,
+                  query_delay: float = 0.0) -> dict:
     """Main entry point for JobSpy-based job discovery.
 
     Loads search queries and locations from the user's search config YAML,
@@ -594,6 +604,8 @@ def run_discovery(cfg: dict | None = None, workers: int = 1) -> dict:
         cfg: Override the search configuration dict. If None, loads from
              the user's searches.yaml file.
         workers: Number of concurrent query workers (1 = sequential).
+        query_delay: Seconds to sleep between queries (throttle). Read from
+             env DISCOVERY_QUERY_DELAY if not passed explicitly.
 
     Returns:
         Dict with stats: new, existing, errors, db_total, queries.
@@ -638,4 +650,5 @@ def run_discovery(cfg: dict | None = None, workers: int = 1) -> dict:
         hours_old=hours_old,
         proxy=proxy,
         workers=workers,
+        query_delay=query_delay,
     )

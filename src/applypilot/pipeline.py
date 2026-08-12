@@ -95,8 +95,10 @@ def _run_discover(workers: int = 1) -> dict:
 def _discover_jobspy(workers: int = 1) -> dict:
     """Run JobSpy full crawl (its own concurrency). Returns partial stats."""
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
+    import os
     from applypilot.discovery.jobspy import run_discovery
-    run_discovery(workers=workers)
+    delay = float(os.environ.get("DISCOVERY_QUERY_DELAY", "0") or 0)
+    run_discovery(workers=workers, query_delay=delay)
     return {"jobspy": "ok"}
 
 
