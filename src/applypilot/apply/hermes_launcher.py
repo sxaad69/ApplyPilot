@@ -60,6 +60,8 @@ def _build_candidate_profile() -> str:
     avail = profile.get("availability", {})
     if avail.get("earliest_start_date"):
         lines.append(f"- Earliest Start Date: {avail['earliest_start_date']}")
+    if avail.get("notice_period"):
+        lines.append(f"- Notice Period: {avail['notice_period']}")
     if avail.get("available_for_full_time"):
         lines.append(f"- Available Full-Time: {avail['available_for_full_time']}")
     if avail.get("available_for_contract"):
