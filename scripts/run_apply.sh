@@ -32,17 +32,10 @@ while true; do
   READY=$(count_prepared)
   echo "[$(date)] apply: ${READY} prepared job(s) ready"
   if [ "${READY:-0}" -gt 0 ]; then
-    # Ensure the logged-in CDP Chrome is running (only when we have work).
-    if ! curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
-      mkdir -p "$HOME/.hermes/chrome-debug"
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-        --remote-debugging-port=9222 \
-        --user-data-dir="$HOME/.hermes/chrome-debug" \
-        --no-first-run --no-default-browser-check >/dev/null 2>&1 &
-      sleep 5
-    fi
+    # Chrome is managed by the com.applypilot.chrome launchd agent (KeepAlive),
+    # so it's always on :9222 with the logged-in profile. Just run the apply.
     "$APP_DIR/.venv/bin/applypilot" apply --limit 5 \
-      >> "$LOG_DIR/apply.log" 2>&1
+      >> "$LOG_DIR/apply.log" 2>&1 || true
   else
     echo "[$(date)] apply: no work, skipping pass"
   fi
