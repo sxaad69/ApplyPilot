@@ -20,6 +20,20 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 
+def _real(value) -> str | None:
+    """Return the value if it's a real URL/value, else None.
+
+    Treats the literal string 'None' (a common data bug from scrapers), empty
+    strings, and whitespace as "missing".
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() == "none":
+        return None
+    return s
+
+
 def _build_candidate_profile() -> str:
     """Build a rich candidate profile block from profile.json + resume.txt.
 
@@ -124,7 +138,7 @@ def _build_prompt(job: dict, resume_pdf: str, dry_run: bool = False) -> str:
         "For filling fields use mcp__playwright__browser_fill_form or mcp__playwright__browser_type.",
         "",
         f"Job: {job.get('title')} at {job.get('site')}",
-        f"Application URL: {job.get('application_url') or job.get('url')}",
+        f"Application URL: {_real(job.get('application_url')) or _real(job.get('url'))}",
         f"Resume PDF: {resume_pdf}",
         "",
         _build_candidate_profile(),
@@ -252,8 +266,9 @@ def _persist_to_db(job: dict, status: str, detail: dict) -> None:
     now = datetime.now().astimezone().isoformat()
     # Match by application_url if present (target-url applies find jobs by
     # application_url), else by the canonical url.
-    match_col = "application_url" if job.get("application_url") else "url"
-    url = job.get("application_url") or job.get("url")
+    app_url = _real(job.get("application_url"))
+    match_col = "application_url" if app_url else "url"
+    url = app_url or _real(job.get("url"))
     if not url:
         return
     apply_status = "applied" if status == "applied" else ("error" if status.startswith("failed") else status)
